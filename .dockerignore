@@ -1,0 +1,11 @@
+.venv-backend/
+.venv/
+__pycache__/
+*.pyc
+backend/data/
+backend/.env
+backend/testing_samples/
+frontend/node_modules/
+frontend/dist/
+mcp_Manim_Agent/
+.git/

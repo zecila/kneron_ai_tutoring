@@ -1,0 +1,19 @@
+# Rotate
+class Rotate(mobject=None, *args, use_override=True, **kwargs)
+Animation that rotates a Mobject.
+
+## Parameters
+- mobject: the MObject to be rotated
+- angle (float): the rotation angle
+- about_point (list of length 3): point to rotate about
+
+# Example Usage
+```python
+self.play(
+    Rotate(
+        Square(side_length=0.5).shift(UP * 2),
+        angle=2*PI,
+        about_point=[0, 0, 0]
+    )
+)
+```

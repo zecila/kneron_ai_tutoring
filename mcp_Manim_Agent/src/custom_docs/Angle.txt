@@ -1,0 +1,15 @@
+# Angle
+class Angle(line1, line2, radius=None, quadrant=(1, 1), other_angle=False, dot=False, dot_radius=None, dot_distance=0.55, dot_color=ManimColor('#FFFFFF'), elbow=False, **kwargs)
+A circular arc or elbow-type mobject representing an angle of two lines.
+
+## Parameters
+- line1 (Line): The first line.
+- line2 (Line): The second line.
+- quadrant (AngleQuadrant): A sequence of two int numbers determining which of the 4 quadrants should be used. The first value indicates whether to anchor the arc on the first line closer to the end point (1) or start point (-1), and the second value functions similarly for the end (1) or start (-1) of the second line. Possibilities: (1,1), (-1,1), (1,-1), (-1,-1).
+
+## Example Usage
+```python
+line1 = Line(LEFT, RIGHT)
+line2 = line(DOWN, UP)
+angle = Angle(line1, line2, quadrant=(1,1))
+```

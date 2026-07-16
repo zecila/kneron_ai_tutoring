@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lesson Slideshow</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+  <!-- KaTeX for equation rendering -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css" />
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+  <script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+  <div id="app">
+
+    <!-- Welcome / Home screen -->
+    <div id="welcome-screen">
+      <div class="topnav-right">
+        <button id="btn-to-progress-welcome" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-welcome" onclick="switchScene('lessons')">Lessons</button>
+        <div id="auth-control-welcome" class="auth-control"></div>
+      </div>
+      <div class="welcome-inner">
+          <div class="welcome-hero">
+          <p class="welcome-eyebrow">AI-Powered Studying</p>
+          <h1 class="welcome-title">Turn any document into a lesson</h1>
+          <p class="welcome-subtitle">Upload your notes, slides, or readings and get a guided lesson back: key concepts explained, animated where it helps, with flashcards and quizzes to check what stuck.</p>
+          <div class="welcome-features">
+            <div class="welcome-feature">
+              <span class="welcome-feature-icon">◆</span>
+              <span>Concepts mapped out for you</span>
+            </div>
+            <div class="welcome-feature">
+              <span class="welcome-feature-icon">◆</span>
+              <span>Animated visual explanations</span>
+            </div>
+            <div class="welcome-feature">
+              <span class="welcome-feature-icon">◆</span>
+              <span>Quizzes with progress tracking</span>
+            </div>
+          </div>
+          </div>
+
+          <div class="upload-area" id="upload-area">
+          <div class="upload-icon">⬆</div>
+          <p class="upload-hint">Drop a file here, or click to browse</p>
+          <p class="upload-types">PDF · DOCX · PPTX</p>
+          <input type="file" id="file-input" accept=".pdf,.docx,.pptx" />
+          </div>
+
+          <div class="upload-actions">
+          <div id="file-status" class="file-status hidden">
+              <span class="file-icon">📄</span>
+              <span id="file-name"></span>
+              <button class="file-clear" onclick="clearFile()">✕</button>
+          </div>
+          <button id="btn-generate" class="btn-generate" onclick="generateLesson()" disabled>
+              Generate Lesson →
+          </button>
+          </div>
+      </div>
+    </div>
+
+    <!-- Loading state -->
+    <div id="loading-screen" class="hidden">
+      <div class="loader-inner">
+        <div class="loader-bar" id="loader-bar"></div>
+        <p id="loader-message">Loading lesson...</p>
+      </div>
+    </div>
+
+    <!-- Error state -->
+    <div id="error-screen" class="hidden">
+      <div class="error-inner">
+        <span class="error-code">404</span>
+        <p id="error-message">Could not load slideshow.</p>
+        <div id="error-actions">
+          <button id="btn-error-retry" onclick="retryFailedLesson()">Retry</button>
+          <button id="btn-error-home" onclick="doGoHome()">Home</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="start-screen" class="hidden">
+      <div id="start-card">
+        <div id="start-eyebrow">Lesson ready</div>
+        <h1 id="start-lesson-title"></h1>
+        <button id="lesson-start-btn">Start Lesson</button>
+      </div>
+    </div>
+
+    <!-- Slideshow -->
+    <div id="slideshow" class="hidden">
+
+      <!-- Top bar -->
+      <header id="topbar">
+        <div id="topbar-quicknav">
+          <button id="btn-home" onclick="confirmHome()">Home</button>
+          <div class="topnav-right">
+            <button id="btn-to-progress" onclick="switchScene('progress')">Progress</button>
+            <button id="btn-to-lessons" onclick="switchScene('lessons')">Lessons</button>
+            <div id="auth-control-slideshow" class="auth-control"></div>
+          </div>
+        </div>
+        <div id="topbar-lesson">
+          <div id="course-name"></div>
+          <button id="btn-to-study" onclick="switchScene('study')">Study &#8594;</button>
+        </div>
+      </header>
+
+      <!-- Slide stage -->
+      <main id="stage">
+        <div id="slide-scaler">
+          <div id="slide-badge-container">
+            <!-- Slide type badge -->
+            <div id="type-badge"></div>
+          </div>
+          <div id="slide-container">
+          <!-- slides injected here -->
+          </div>
+        </div>
+        <div id="notes-bar">
+          <div id="tts-controls" class="tts-controls">
+            <button id="tts-skip-start-btn" class="tts-btn tts-btn-skip" title="Restart narration">⏮</button>
+            <button id="tts-narrate-btn" class="tts-btn">▶</button>
+            <button id="tts-skip-end-btn" class="tts-btn tts-btn-skip" title="Skip to end">⏭</button>
+
+            <span class="tts-divider"></span>
+
+            <div class="tts-volume-wrap">
+              <button id="tts-mute-btn" class="tts-btn">🔊</button>
+              <div class="tts-volume-popup">
+                <input type="range" id="tts-volume-slider" class="tts-volume-slider"
+                      min="0" max="1" step="0.01" value="1" orient="vertical">
+              </div>
+            </div>
+
+            <div class="tts-speed-wrap">
+              <button id="tts-speed-btn" class="tts-btn" title="Playback speed">1×</button>
+              <div id="tts-speed-menu" class="tts-speed-menu">
+                <button class="tts-speed-item" data-speed="0.75">0.75×</button>
+                <button class="tts-speed-item speed-active" data-speed="1">1× (Normal)</button>
+                <button class="tts-speed-item" data-speed="1.25">1.25×</button>
+                <button class="tts-speed-item" data-speed="1.5">1.5×</button>
+                <button class="tts-speed-item" data-speed="2">2×</button>
+              </div>
+            </div>
+
+          </div>
+          <button id="notes-toggle-btn" onclick="toggleNotes()">Notes</button>
+        </div>
+        <div id="notes-panel" class="hidden">
+          <div id="notes-content"></div>
+        </div>
+      </main>
+
+      <!-- Nav controls -->
+      <nav id="controls">
+        <button id="btn-prev" onclick="navigate(-1)" aria-label="Previous slide">&#8592;</button>
+        <button id="btn-next" onclick="navigate(1)" aria-label="Next slide">&#8594;</button>
+        <div id="slide-counter"></div>
+      </nav>
+
+      <aside id="dot-nav">
+        <div id="dot-nav-inner">
+        </div>
+      </aside>
+      <button id="sidebar-toggle" onclick="toggleSidebar()" aria-label="Collapse sidebar">&#8249;</button>
+
+          <!-- Info panel (right side, definition / equation detail) -->
+      <aside id="info-panel">
+        <div id="info-card">
+          <div id="info-card-header">
+            <span id="info-card-type-badge">Definition</span>
+            <button id="info-close-btn" onclick="closeInfoPanel()" aria-label="Close panel">✕</button>
+          </div>
+          <div id="info-card-term"></div>
+          <div id="info-card-content">
+            <!-- populated by JS -->
+          </div>
+        </div>
+      </aside>
+
+    </div>
+  
+    <!-- Study scene -->
+    <div id="study" class="hidden">
+    <header id="study-topbar">
+      <div id="study-topbar-quicknav">
+        <button id="btn-home-study" onclick="confirmHome()">Home</button>
+        <div class="topnav-right">
+          <button id="btn-to-progress-study" onclick="switchScene('progress')">Progress</button>
+          <button id="btn-to-lessons-study" onclick="switchScene('lessons')">Lessons</button>
+          <div id="auth-control-study" class="auth-control"></div>
+        </div>
+      </div>
+      <div id="study-topbar-lesson">
+        <div id="study-course-name"></div>
+        <button id="btn-to-slides" onclick="switchScene('slideshow')">&#8592; Slides</button>
+      </div>
+    </header>
+
+    <aside id="concept-nav">
+      <!-- concept list injected here -->
+    </aside>
+
+    <main id="concept-stage">
+      <div id="concept-placeholder">
+        <p>Select a concept from the sidebar.</p>
+      </div>
+      <div id="concept-detail" class="hidden"></div>
+    </main>
+  </div>
+
+
+  <div id="progress-screen" class="hidden">
+    <header id="progress-topbar">
+      <button id="btn-home-progress" onclick="confirmHome()">Home</button>
+      <div id="progress-course-name"></div>
+      <button id="btn-to-lessons-progress" onclick="switchScene('lessons')">Lessons</button>
+      <!-- progress-topbar -->
+      <div id="auth-control-progress" class="auth-control"></div>
+      <button id="btn-back-progress" onclick="goBackFromProgress()">Back</button>
+    </header>
+    <main id="progress-content">
+      <h1 class="lessons-page-heading">My Progress</h1>
+    </main>
+  </div>
+
+  <div id="lessons-screen" class="hidden">
+    <header id="lessons-topbar">
+      <button id="btn-home-lessons" onclick="confirmHome()">Home</button>
+      <div class="topnav-right">
+        <button id="btn-to-progress-lessons" onclick="switchScene('progress')">Progress</button>
+        <!-- lessons-topbar, inside .topnav-right -->
+        <div id="auth-control-lessons" class="auth-control"></div>
+        <button id="btn-back-lessons" onclick="goBackFromProgress()">Back</button>
+      </div>
+    </header>
+    <main id="lessons-content">
+      <h1 class="lessons-page-heading">My Lessons</h1>
+      <div id="lesson-library" class="lesson-library-card hidden">
+        <p class="lesson-library-heading">Lesson Library</p>
+        <div id="lesson-library-list"></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="account-screen" class="hidden">
+    <header id="account-topbar">
+      <button id="btn-home-account" onclick="confirmHome()">Home</button>
+      <div class="topnav-right">
+        <!-- account-topbar, inside .topnav-right -->
+        <button id="btn-to-progress-account" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-account" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-account-current" class="topnav-current" disabled>Account</button>
+        <button id="btn-back-account" onclick="goBackFromProgress()">Back</button>
+      </div>
+    </header>
+    <main id="account-content"></main>
+  </div>
+
+  <div id="auth-screen" class="hidden">
+    <header id="auth-topbar">
+      <button id="btn-home-auth" onclick="confirmHome()">Home</button>
+    </header>
+    <main id="auth-content">
+      <div class="auth-card">
+        <h1 class="auth-title" id="auth-title">Welcome back</h1>
+        <p class="auth-subtitle" id="auth-subtitle">Log in to continue</p>
+        <form id="auth-form">
+          <label class="auth-label" for="auth-email">Email</label>
+          <input type="email" id="auth-email" placeholder="you@example.com" required />
+
+          <label class="auth-label" for="auth-password">Password</label>
+          <div class="auth-password-wrap">
+            <input type="password" id="auth-password" placeholder="••••••••" required />
+            <button type="button" id="auth-password-toggle" class="auth-password-toggle-btn" aria-label="Show password">👁</button>
+          </div>
+
+          <p id="auth-error" class="auth-error"></p>
+          <button type="submit" id="auth-submit">Log in</button>
+          <button type="button" id="auth-toggle-mode">Need an account? Sign up</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <div id="home-modal" class="hidden">
+      <div id="home-modal-backdrop" onclick="cancelHome()"></div>
+      <div id="home-modal-dialog">
+        <p id="home-modal-message">Ending Lesson. Are you sure?</p>
+        <div id="home-modal-buttons">
+          <button id="home-modal-cancel" onclick="cancelHome()">Cancel</button>
+          <button id="home-modal-confirm" onclick="doGoHome()">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="delete-modal" class="hidden">
+      <div id="delete-modal-backdrop" onclick="cancelDeleteModal()"></div>
+      <div id="delete-modal-dialog">
+        <p id="delete-modal-message">Deleting lesson. Are you sure?</p>
+        <div id="delete-modal-buttons">
+          <button id="delete-modal-cancel" onclick="cancelDeleteModal()">Cancel</button>
+          <button id="delete-modal-confirm" onclick="confirmDeleteModal()">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+  
+</body>
+</html>

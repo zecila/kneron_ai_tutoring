@@ -1,0 +1,13 @@
+# Circle
+class Circle(radius=None, color=ManimColor('#FC6255'), **kwargs)
+A circle.
+
+## Parameters
+- color (ParsableManimColor): The color of the shape.
+- radius (float)
+
+## Example Usage
+```python
+circle = Circle(color=BLUE, radius=1)
+circle.move_to([0, 1, 0])
+```

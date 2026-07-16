@@ -1,0 +1,11 @@
+# Write
+class Write(mobject=None, *args, use_override=True, **kwargs)
+Simulate hand-writing a Text or hand-drawing a VMobject.
+
+## Parameters
+- mobject: the VMObject to animate
+
+## Example Usage
+```python
+self.play(Write(Text('Hello', font_size=144)))
+```

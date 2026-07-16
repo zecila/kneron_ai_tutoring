@@ -1,0 +1,13 @@
+# Unwrite
+class Unwrite(mobject=None, *args, use_override=True, **kwargs)
+Simulate erasing by hand a Text or a VMobject.
+
+## Parameters
+- mobject: the VMObject to animate
+
+## Example Usage
+```python
+text = Text('Hello', font_size=144)
+self.add(text)
+self.play(Unwrite(text))
+```

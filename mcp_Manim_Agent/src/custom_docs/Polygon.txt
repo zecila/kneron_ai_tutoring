@@ -1,0 +1,17 @@
+# Polygon
+class Polygon(*vertices, **kwargs)
+A shape consisting of one closed loop of vertices.
+
+## Parameters
+- vertices (Point3DLike): The vertices of the Polygon.
+
+## Example Usage
+```python
+vertices = [
+    [0, 0, 0],
+    [0, 1, 0],
+    [1, 1, 0],
+    [2, 0, 0]
+]
+polygon = Polygon(*vertices, color=BLUE)
+```

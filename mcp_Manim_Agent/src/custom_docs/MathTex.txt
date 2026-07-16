@@ -1,0 +1,13 @@
+# MathTex
+class MathTex(*tex_strings, font_size)
+A string compiled with LaTeX in math mode.
+
+## Parameters
+- *tex_strings: Tex strings to display
+- font_size (float): font size 
+
+## Example Usage
+Important: Be sure to use raw string literals.
+```python
+text = MathTex(r'a^2+b^2=c^2', font_size=36)
+```

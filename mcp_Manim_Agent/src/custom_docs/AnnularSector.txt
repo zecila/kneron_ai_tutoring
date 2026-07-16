@@ -1,0 +1,17 @@
+# AnnularSector
+class AnnularSector(inner_radius=1, outer_radius=2, angle=1.5707963267948966, start_angle=0, fill_opacity=1, stroke_width=0, color=ManimColor('#FFFFFF'), **kwargs)
+A sector of an annulus.
+
+## Parameters
+- inner_radius (float): The inside radius of the Annular Sector.
+- outer_radius (float): The outside radius of the Annular Sector.
+- angle (float): The counterclockwise angle of the Annular Sector.
+- start_angle (float): The starting counterclockwise angle of the Annular Sector.
+- fill_opacity (float): The opacity of the color filled in the Annular Sector.
+- stroke_width (float): The stroke width of the Annular Sector.
+- color (ParsableManimColor): The color filled into the Annular Sector.
+
+## Example Usage
+```python
+s = AnnularSector(inner_radius=0.5, outer_radius=1.5, start_angle=PI/4, angle=PI/4, color=BLUE)
+```

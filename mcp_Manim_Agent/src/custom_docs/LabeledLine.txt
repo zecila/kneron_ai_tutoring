@@ -1,0 +1,22 @@
+# LabeledLine
+class LabeledLine(label, label_position=0.5, label_config=None, box_config=None, frame_config=None, *args, **kwargs)
+Constructs a line containing a label box somewhere along its length.
+
+## Parameters
+- label (str | Tex | MathTex | Text): Label that will be displayed on the line.
+- label_position (float): A ratio in the range [0-1] to indicate the position of the label with respect to the length of the line. Default value is 0.5.
+- label_config (dict[str, Any] | None): A dictionary containing the configuration for the label. This is only applied if label is of type str.
+- box_config (dict[str, Any] | None): A dictionary containing the configuration for the background box.
+- frame_config (dict[str, Any] | None): A dictionary containing the configuration for the frame.
+
+## Example Usage
+```python
+line = LabeledLine(
+    label          = '0.5',
+    label_position = 0.8,
+    label_config = {
+        'font_size' : 20
+    },
+    start=LEFT+DOWN,
+    end=RIGHT+UP)
+```

@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - MANIM_MCP_URL=http://manim-agent:8000/mcp/
+      - MANIM_DOWNLOAD_URL=http://manim-agent:8000/download
+      - REDIS_URL=redis://redis:6379
+      - FLASK_ENV=${FLASK_ENV:-development}
+    volumes:
+      - ./backend/data:/app/backend/data
+    depends_on:
+      - redis
+      - manim-agent
+    restart: unless-stopped
+
+  manim-agent:
+    build: ./mcp_Manim_Agent/src
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped

@@ -1,0 +1,12 @@
+# Line
+class Line(start=array([-1., 0., 0.]), end=array([1., 0., 0.]), buff=0, path_arc=None, **kwargs)
+A line
+
+## Parameters
+- start (Point3DLike | Mobject)
+- end (Point3DLike | Mobject)
+
+## Example Usage
+```python
+line = Line(start=[0, 1, 0], end=[3, 3, 0])
+```

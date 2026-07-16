@@ -1,0 +1,13 @@
+# move_to
+
+Animate moving a MObject
+
+## Parameters
+- point (list of length 3): point to move to
+
+## Example Usage
+```python
+square = Square()
+self.add(square)
+self.play(square.animate.move_to([0, 2, 0]))
+```

@@ -1,0 +1,13 @@
+# Rectangle
+class Rectangle(color=ManimColor('#FFFFFF'), height=2.0, width=4.0, grid_xstep=None, grid_ystep=None, mark_paths_closed=True, close_new_points=True, **kwargs)
+A quadrilateral with two sets of parallel sides.
+
+## Parameters
+- color (ParsableManimColor): The color of the rectangle.
+- height (float): The vertical height of the rectangle.
+- width (float): The horizontal width of the rectangle.
+
+## Example Usage
+```python
+rect = Rectangle(width=1.0, height=4.0)
+```

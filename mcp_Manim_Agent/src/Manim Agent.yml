@@ -1,0 +1,959 @@
+app:
+  description: ''
+  icon: 🤖
+  icon_background: '#FFEAD5'
+  mode: advanced-chat
+  name: Manim Agent
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/openai_api_compatible:0.0.17@c8ad1f86e58c34cfb1eba375ce579502601d40c573038b8bd1bcb75dedc90acd
+kind: app
+version: 0.3.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      allowed_file_extensions:
+      - .JPG
+      - .JPEG
+      - .PNG
+      - .GIF
+      - .WEBP
+      - .SVG
+      allowed_file_types:
+      - image
+      allowed_file_upload_methods:
+      - local_file
+      - remote_url
+      enabled: false
+      fileUploadConfig:
+        audio_file_size_limit: 50
+        batch_count_limit: 5
+        file_size_limit: 15
+        image_file_size_limit: 10
+        video_file_size_limit: 100
+        workflow_file_upload_limit: 10
+      image:
+        enabled: false
+        number_limits: 3
+        transfer_methods:
+        - local_file
+        - remote_url
+      number_limits: 3
+    opening_statement: ''
+    retriever_resource:
+      enabled: true
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: llm
+      id: 1750802424100-source-1752086214636-target
+      selected: false
+      source: '1750802424100'
+      sourceHandle: source
+      target: '1752086214636'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: http-request
+        targetType: answer
+      id: 1752182087135-source-answer-target
+      selected: false
+      source: '1752182087135'
+      sourceHandle: source
+      target: answer
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: llm
+      id: 1749746275938-source-1752529976720-target
+      selected: false
+      source: '1749746275938'
+      sourceHandle: source
+      target: '1752529976720'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: if-else
+      id: 1752529976720-source-1752529982187-target
+      selected: false
+      source: '1752529976720'
+      sourceHandle: source
+      target: '1752529982187'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1752529982187-true-1750802424100-target
+      selected: false
+      source: '1752529982187'
+      sourceHandle: 'true'
+      target: '1750802424100'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: if-else
+        targetType: llm
+      id: 1752529982187-false-1752531034264-target
+      selected: false
+      source: '1752529982187'
+      sourceHandle: 'false'
+      target: '1752531034264'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1752087727687-source-1752531695336-target
+      selected: false
+      source: '1752087727687'
+      sourceHandle: source
+      target: '1752531695336'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: variable-aggregator
+        targetType: code
+      id: 1752531695336-source-1752002197983-target
+      selected: false
+      source: '1752531695336'
+      sourceHandle: source
+      target: '1752002197983'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: llm
+        targetType: variable-aggregator
+      id: 1752531034264-source-1752531695336-target
+      selected: false
+      source: '1752531034264'
+      sourceHandle: source
+      target: '1752531695336'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: tool
+      id: 1752002197983-source-1752607530368-target
+      selected: false
+      source: '1752002197983'
+      sourceHandle: source
+      target: '1752607530368'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: tool
+        targetType: http-request
+      id: 1752607530368-source-1752182087135-target
+      selected: false
+      source: '1752607530368'
+      sourceHandle: source
+      target: '1752182087135'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: code
+      id: 1752086214636-source-1752613110348-target
+      selected: false
+      source: '1752086214636'
+      sourceHandle: source
+      target: '1752613110348'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: code
+        targetType: tool
+      id: 1752613110348-source-1752601124096-target
+      selected: false
+      source: '1752613110348'
+      sourceHandle: source
+      target: '1752601124096'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInLoop: false
+        sourceType: tool
+        targetType: llm
+      id: 1752601124096-source-1752087727687-target
+      selected: false
+      source: '1752601124096'
+      sourceHandle: source
+      target: '1752087727687'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: Start
+        type: start
+        variables: []
+      height: 54
+      id: '1749746275938'
+      position:
+        x: 30
+        y: 384.5
+      positionAbsolute:
+        x: 30
+        y: 384.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        answer: '{{#1752182087135.files#}}'
+        desc: ''
+        selected: false
+        title: Answer
+        type: answer
+        variables: []
+      height: 105
+      id: answer
+      position:
+        x: 4129
+        y: 269.5
+      positionAbsolute:
+        x: 4129
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: llm_zh_v_1_3_1
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - id: f96d6c30-729b-4da5-8805-fda9d40f2245
+          role: system
+          text: '## Core Role and Constraints
+
+            You are a mathematical visualization expert who creates precise, code-ready
+            animation specifications. Your task is to analyze the user''s requested
+            mathematical concept and decompose them into specific visual steps that
+            can be directly implemented in code.
+
+
+            ## Critical Requirements
+
+            Coordinate bounds: x ∈ [-7.1, 7.1], y ∈ [-4, 4] (STRICTLY ENFORCED)
+
+            Output format: Follow the exact step-by-step structure shown in the example
+
+            Scaling: If your concept exceeds bounds, scale ALL coordinates by the
+            same factor. Do not scale the labels.
+
+            Precision: Be specific enough that a programmer can implement without
+            guessing
+
+
+            ## Output Format (MANDATORY)
+
+            Use this exact structure with bullet points:
+
+            - [Action] [specific coordinates/measurements] [labels if applicable]
+
+            - [Next action] [specific details]
+
+            - [Continue until concept is fully visualized]
+
+
+            ## Required Elements
+
+            1. Geometric objects: Specify exact coordinates for all shapes
+
+            2. Labels: Include mathematical notation for key measurements
+
+            3. Mathematical expressions: Show the formula and calculation steps
+
+            4. Final result: Display the computed answer
+
+
+            ## Example Structure
+
+            For the area of a triangle:
+
+            - Create a polygon with vertices (-3, -1), (3, -1), and (2, 3).
+
+            - Label a line from (-3, -1) to (3, -1) "b=6".
+
+            - Label a line from (2, 3) to (2, -1) "h=4".
+
+            - Write text "A=\frac{1}{2}bh"
+
+            - Write text "A=\frac{1}{2}\cdot 6\cdot 4"
+
+            - Write text "A=12"
+
+
+            ## Response Requirements
+
+            Output ONLY the step-by-step visualization
+
+            No explanatory text before or after
+
+            No alternative approaches or additional commentary
+
+            Follow the bullet point format exactly
+
+            Ensure all coordinates are within the specified bounds
+
+
+            ## Validation Checklist
+
+            Before responding, verify:
+
+            [ ] All coordinates are within [-7.1, 7.1] × [-4, 4]
+
+            [ ] Steps are specific enough for direct code implementation
+
+            [ ] Mathematical notation is included where relevant
+
+            [ ] Final calculation is shown
+
+            [ ] Format matches the example exactly'
+        - id: 7c73b942-14e9-4a85-9ba8-1db2c211bfbe
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: Define Instructions
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 90
+      id: '1750802424100'
+      position:
+        x: 1123
+        y: 269.5
+      positionAbsolute:
+        x: 1123
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        desc: ''
+        is_team_authorization: true
+        output_schema: null
+        paramSchemas:
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: ''
+            ja_JP: ''
+            pt_BR: ''
+            zh_Hans: ''
+          label:
+            en_US: code
+            ja_JP: code
+            pt_BR: code
+            zh_Hans: code
+          llm_description: ''
+          max: null
+          min: null
+          name: code
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        params:
+          code: ''
+        provider_id: manim-mcp-server
+        provider_name: Manim MCP Server
+        provider_type: mcp
+        selected: false
+        title: generate_video
+        tool_configurations: {}
+        tool_description: "Generates video based on urllib.parse.quote'd code.\n\n\
+          Args:\n    code (str): urllib.parse.quote'd code to generate video from.\n\
+          \nReturns:\n    str: Empty string."
+        tool_label: generate_video
+        tool_name: generate_video
+        tool_parameters:
+          code:
+            type: mixed
+            value: '{{#1752002197983.result#}}'
+        type: tool
+        version: '2'
+      height: 86
+      id: '1752607530368'
+      position:
+        x: 3461
+        y: 269.5
+      positionAbsolute:
+        x: 3461
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        code: "from urllib.parse import quote\n\ndef main(arg1: str) -> dict:\n  \
+          \  return {\n        \"result\": quote(arg1),\n    }"
+        code_language: python3
+        desc: ''
+        outputs:
+          result:
+            children: null
+            type: string
+        selected: false
+        title: Quote Code
+        type: code
+        variables:
+        - value_selector:
+          - '1752531695336'
+          - Group1
+          - output
+          value_type: object
+          variable: arg1
+      height: 54
+      id: '1752002197983'
+      position:
+        x: 3127
+        y: 269.5
+      positionAbsolute:
+        x: 3127
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: llm_zh_v_1_3_1
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - id: c4d324d4-f6d0-4136-8e29-7711f45abf39
+          role: system
+          text: '## Core Role
+
+            You are an expert in Manim (Python Mathematical Animation Library) and
+            mathematical visualization. Your task is to analyze animation instructions
+            and identify the precise Manim components needed for implementation.
+
+
+            ## Instructions
+
+            {{#1750802424100.text#}}
+
+
+            ## Task Description
+
+            Given step-by-step animation instructions, determine which Manim objects
+            and methods are required by:
+
+            Analyzing each instruction for geometric shapes, animations, and text
+            elements
+
+            Identifying Manim equivalents from the provided documentation list
+
+            Including all necessary components without omitting any required elements
+
+
+            ## Available Documentation Components
+
+            Rotate: Animation that rotates a Mobject
+
+            LabeledLine: Constructs a line containing a label box somewhere along
+            its length
+
+            Polygon: A shape consisting of one closed loop of vertices
+
+            Rectangle: A quadrilateral with two sets of parallel sides
+
+            Circle: A circle
+
+            Create: Incrementally show a VMObject
+
+            Uncreate: Like Create but in reverse
+
+            Unwrite: Simulate erasing by hand a Text or a VMobject
+
+            Angle: A circular arc or elbow-type mobject representing an angle of two
+            lines
+
+            move_to: Animate moving a MObject
+
+            Line: A line
+
+            AnnularSector: A sector of an annulus
+
+            Write: Simulate hand-writing a Text or hand-drawing a VMobject
+
+            MathTex: A string compiled with LaTeX in math mode
+
+
+            ## Example Output Format
+
+            Rotate,Line,MathTex,move_to'
+        selected: false
+        title: Define Context
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 90
+      id: '1752086214636'
+      position:
+        x: 1457
+        y: 269.5
+      positionAbsolute:
+        x: 1457
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: llm_zh_v_1_3_1
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - id: 95a71b7d-7957-4910-93a6-87707fe3d681
+          role: system
+          text: "## Core Role\nYou are an expert in Manim (Python Mathematical Animation\
+            \ Library) and mathematical visualization. Your task is to convert step-by-step\
+            \ animation instructions into precise, executable Python code.\n\n## User's\
+            \ Prompt\n{{#sys.query#}}\n\n## Instructions\n{{#1750802424100.text#}}\n\
+            \n## Context\n{{#1752601124096.text#}}\n\n## Code Requirements\n### Mandatory\
+            \ Structure\n```python\nfrom manim import *\nfrom mylib import *\n\nclass\
+            \ Main(Scene):\n    def construct(self):\n        # Your code here\n```\n\
+            ### LaTeX\nUse LaTeX, not symbols, in your derivations. Also, be sure\
+            \ to use raw string literals for all LaTeX. For example, do not use the\
+            \ sub 2 symbol.\n\n## Coordinate System\nAll coordinates must be 3D: [x,\
+            \ y, 0] format\nCoordinate bounds: x ∈ [-7.1, 7.1], y ∈ [-4, 4]\n\n##\
+            \ Output Requirements\nCode only: No explanatory text, comments, or natural\
+            \ language\nComplete implementation: Ready to run without modifications\n\
+            Proper formatting: Consistent indentation and spacing\nSequential logic:\
+            \ Follow the instruction order precisely\nDo not use self.add(), only\
+            \ self.play().\n\n## Example Code\n```python\nfrom manim import *\nfrom\
+            \ mylib import *\n\nclass Main(Scene):\n    def construct(self):\n   \
+            \     # Define points\n        A = [-3, -1, 0]\n        B = [3, -1, 0]\n\
+            \        C = [2, 3, 0]\n        \n        # Create shapes\n        triangle\
+            \ = Polygon(A, B, C, color=BLUE, fill_opacity=0.2)\n        self.play(Create(triangle))\n\
+            \        self.wait(1)\n        \n        # Add labels\n        base =\
+            \ LabeledLine(start=A, end=B, label=\"b=6\", color=YELLOW)\n        height\
+            \ = LabeledLine(start=[2, -1, 0], end=C, label=\"h=4\", color=GREEN)\n\
+            \        self.play(Create(base))\n        self.wait(1)\n        self.play(Create(height))\n\
+            \        self.wait(1)\n        \n        # Mathematical derivation\n \
+            \       derivation = [\n            MathTex(r'A=\\frac{1}{2}bh', font_size=36),\n\
+            \            MathTex(r'A=\\frac{1}{2}\\cdot 6 \\cdot 4=12', font_size=36,\
+            \ color=GREEN)\n        ]\n        for i, line in enumerate(derivation):\n\
+            \            if i == 0:\n                line.move_to(np.array([4, 3,\
+            \ 0]))\n            else:\n                line.next_to(derivation[i-1],\
+            \ DOWN, buff=0.2)\n        for line in derivation:\n            self.play(Write(line))\n\
+            \            self.wait(1)\n```"
+        selected: false
+        title: Write Code
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 90
+      id: '1752087727687'
+      position:
+        x: 2459
+        y: 269.5
+      positionAbsolute:
+        x: 2459
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        authorization:
+          config: null
+          type: no-auth
+        body:
+          data: []
+          type: none
+        desc: ''
+        headers: ''
+        method: get
+        params: ''
+        retry_config:
+          max_retries: 3
+          retry_enabled: true
+          retry_interval: 100
+        selected: false
+        ssl_verify: true
+        timeout:
+          max_connect_timeout: 0
+          max_read_timeout: 0
+          max_write_timeout: 0
+        title: Get Video
+        type: http-request
+        url: http://host.docker.internal:8000/download/Main.mp4
+        variables: []
+      height: 139
+      id: '1752182087135'
+      position:
+        x: 3795
+        y: 269.5
+      positionAbsolute:
+        x: 3795
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: llm_zh_v_1_3_1
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - id: 827b6ad7-2bf3-4605-97b8-395f5cbe9258
+          role: system
+          text: 'You are an expert in mathematical visualization. The user is requesting
+            to visualize a certain mathematical concept: {{#sys.query#}}. Can any
+            of the following Python methods do so? Respond in one word, "Yes" or "No".
+
+
+            Methods:
+
+            - play_natural_number_sum_proof: Plays the visual proof of 1+2+...+n=n(n+1)/2.
+
+            - play_circ_area_proof: Plays the visual proof of the area of a circle.
+
+            - play_pythag_visual: Plays Pythagorean theorem visualization, with a
+            square on each side of the right triangle.
+
+            - play_pythag_proof: Plays Pythagorean theorem proof, with four triangles
+            and two squares.'
+        - id: 8ca505a5-5ac0-499b-a6d3-96add722fe11
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: Method Exist?
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 90
+      id: '1752529976720'
+      position:
+        x: 364
+        y: 384.5
+      positionAbsolute:
+        x: 364
+        y: 384.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        cases:
+        - case_id: 'true'
+          conditions:
+          - comparison_operator: contains
+            id: 47232fe3-e863-4a2d-b1bb-fa92eb529413
+            value: 'No'
+            varType: string
+            variable_selector:
+            - '1752529976720'
+            - text
+          id: 'true'
+          logical_operator: and
+        desc: ''
+        selected: false
+        title: IF/ELSE
+        type: if-else
+      height: 126
+      id: '1752529982187'
+      position:
+        x: 698
+        y: 384.5
+      positionAbsolute:
+        x: 698
+        y: 384.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          completion_params: {}
+          mode: chat
+          name: llm_zh_v_1_3_1
+          provider: langgenius/openai_api_compatible/openai_api_compatible
+        prompt_template:
+        - id: 92f83bf0-d7c3-41a5-93bb-8567622c69a7
+          role: system
+          text: "You are an expert in mathematical visualization. Given the user's\
+            \ query, identify which method to use and the derivation that goes with\
+            \ it: {{#sys.query#}}. Then, output Python code. Do not include any natural\
+            \ language. For the derivation, be sure to follow the documentation with\
+            \ regards to how to derive. You must use play_deriv() for the derivation.\n\
+            \nMethods:\n```python\ndef play_natural_number_sum_proof(scene: Scene):\n\
+            \    \"\"\"\n    Plays the visual proof of 1+2+...+n=n(n+1)/2. \n    Begin\
+            \ derivation with 2(1 + 2 + \\dots + n) = A = b \\cdot h = n(n+1).\n \
+            \   End derivation with 1+2+...+n=n(n+1)/2.\n    \"\"\"\ndef play_circ_area_proof(scene:\
+            \ Scene):\n    \"\"\"\n    Plays the visual proof of the area of a circle.\
+            \ \n    Begin derivation with A = b \\cdot h = \\pi r \\cdot r\n    \"\
+            \"\"\ndef play_pythag_visual(scene: Scene, a=None, b=None, c=None):\n\
+            \    \"\"\"\n    Plays Pythagorean theorem visualization, with a square\
+            \ on each side of the right triangle. \n    Start derivation with a^2\
+            \ + b^2 = c^2\n    \"\"\"\ndef play_pythag_proof(scene: Scene):\n    \"\
+            \"\"\n    Plays Pythagorean theorem proof, with four triangles and two\
+            \ squares.\n    Start derivation with A_{big square} = A_{four triangles}\
+            \ + A_{small square}.\n    \"\"\"\n```\n\nOutput format:\nOutput your\
+            \ code in the following format, but replace the method and derivation.\n\
+            ```python\nfrom manim import *\nfrom mylib import *\n\nclass Main(Scene):\n\
+            \    def construct(self):\n        # method goes here\n        play_circ_area_proof(scene=self)\n\
+            \        # derivation goes here\n        # make sure to use raw string\
+            \ literals\n        # make sure to use LaTeX\n        # make sure not\
+            \ to include any special characters\n        play_deriv(r\"A_{circ}=A_{rect}\"\
+            , r\"A_{circ}=b \\cdot h\", r\"A_{circ}=\\pi r \\cdot r = \\pi r^2\",\
+            \ scene=self)\n```"
+        - id: be51bd6d-5760-4912-8f4c-aaf7c46df982
+          role: user
+          text: '{{#sys.query#}}'
+        selected: false
+        title: Write Code
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 90
+      id: '1752531034264'
+      position:
+        x: 2459
+        y: 404.5
+      positionAbsolute:
+        x: 2459
+        y: 404.5
+      selected: true
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        advanced_settings:
+          group_enabled: true
+          groups:
+          - groupId: c3af9c29-1f42-4e14-b73d-44c21214c2fa
+            group_name: Group1
+            output_type: string
+            variables:
+            - - '1752087727687'
+              - text
+            - - '1752531034264'
+              - text
+        desc: ''
+        output_type: string
+        selected: false
+        title: Variable Aggregator
+        type: variable-aggregator
+        variables:
+        - - '1752087727687'
+          - text
+        - - '1752531034264'
+          - text
+      height: 131
+      id: '1752531695336'
+      position:
+        x: 2793
+        y: 269.5
+      positionAbsolute:
+        x: 2793
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        desc: ''
+        is_team_authorization: true
+        output_schema: null
+        paramSchemas:
+        - auto_generate: null
+          default: null
+          form: llm
+          human_description:
+            en_US: ''
+            ja_JP: ''
+            pt_BR: ''
+            zh_Hans: ''
+          label:
+            en_US: docs_list_str
+            ja_JP: docs_list_str
+            pt_BR: docs_list_str
+            zh_Hans: docs_list_str
+          llm_description: ''
+          max: null
+          min: null
+          name: docs_list_str
+          options: []
+          placeholder: null
+          precision: null
+          required: true
+          scope: null
+          template: null
+          type: string
+        params:
+          docs_list_str: ''
+        provider_id: manim-mcp-server
+        provider_name: Manim MCP Server
+        provider_type: mcp
+        selected: false
+        title: get_context
+        tool_configurations: {}
+        tool_description: "Retrieve context for a given query.\n\nArgs:\n    docs_list_str\
+          \ (str): A list of docs to retrieve, separated by \",\".\n\nReturns:\n \
+          \   str: A string of all concatenated documents."
+        tool_label: get_context
+        tool_name: get_context
+        tool_parameters:
+          docs_list_str:
+            type: mixed
+            value: '{{#1752613110348.result#}}'
+        type: tool
+        version: '2'
+      height: 86
+      id: '1752601124096'
+      position:
+        x: 2125
+        y: 269.5
+      positionAbsolute:
+        x: 2125
+        y: 269.5
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    - data:
+        code: "\ndef main(context: str) -> dict:\n    return {\n        \"result\"\
+          : context.strip(\"\\n\"),\n    }\n"
+        code_language: python3
+        desc: ''
+        outputs:
+          result:
+            children: null
+            type: string
+        selected: false
+        title: Prep Context
+        type: code
+        variables:
+        - value_selector:
+          - '1752086214636'
+          - text
+          value_type: string
+          variable: context
+      height: 54
+      id: '1752613110348'
+      position:
+        x: 1791
+        y: 269.5
+      positionAbsolute:
+        x: 1791
+        y: 269.5
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 244
+    viewport:
+      x: -2235.1334981211853
+      y: 174.98788840389983
+      zoom: 0.6227084211059011
