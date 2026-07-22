@@ -35,6 +35,7 @@ from pipeline.text_extraction import run_text_extraction
 from pipeline.llm_curriculum_graph import run_curriculum_extraction
 from pipeline.slideshow_generation import run_slideshow_generation
 from pipeline.animation_generation import run_animation_generation
+from pipeline_queue import enqueue_job, start_workers
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 from lesson_paths import FRONTEND_DIR, UPLOAD_DIR, LESSONS_DIR
@@ -375,13 +376,7 @@ def retry_lesson(lesson_id):
     file_path = matches[0]
 
     write_meta(lesson_id, status=failed_stage, error=None)
-    thread = threading.Thread(
-        target=_run_pipeline,
-        args=(lesson_id, file_path, meta.get("source_filename", "")),
-        kwargs={"resume_from": failed_stage},
-        daemon=True,
-    )
-    thread.start()
+    enqueue_job(lesson_id, file_path, meta.get("source_filename", ""), resume_from=failed_stage, priority=0)
     return jsonify({"status": "retrying"}), 202
     
 
@@ -648,38 +643,40 @@ def _run_pipeline(lesson_id: str, file_path: str, original_filename: str, resume
     itself gets overwritten to FAILED, so without this we'd lose that info).
     """
     stage = resume_from or Status.EXTRACTING
-    with _pipeline_semaphore:
-        try:
-            if stage == Status.EXTRACTING:
-                write_meta(lesson_id, status=stage, source_filename=original_filename)
-                normalized = run_text_extraction(file_path, lesson_id)
-            else:
-                normalized = json.load(open(lesson_path(lesson_id, "normalized_output.json"), encoding="utf-8"))
+    # with _pipeline_semaphore:
+    try:
+        if stage == Status.EXTRACTING:
+            write_meta(lesson_id, status=stage, source_filename=original_filename)
+            normalized = run_text_extraction(file_path, lesson_id)
+        else:
+            normalized = json.load(open(lesson_path(lesson_id, "normalized_output.json"), encoding="utf-8"))
 
-            if stage in (Status.EXTRACTING, Status.BUILDING_CURRICULUM):
-                stage = Status.BUILDING_CURRICULUM
-                write_meta(lesson_id, status=stage)
-                curriculum = run_curriculum_extraction(normalized, lesson_id)
-            else:
-                curriculum = json.load(open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8"))
-            course_name = curriculum.get("curriculum_graph", {}).get("course", "Untitled course")
+        if stage in (Status.EXTRACTING, Status.BUILDING_CURRICULUM):
+            stage = Status.BUILDING_CURRICULUM
+            write_meta(lesson_id, status=stage)
+            curriculum = run_curriculum_extraction(normalized, lesson_id)
+        else:
+            curriculum = json.load(open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8"))
+        course_name = curriculum.get("curriculum_graph", {}).get("course", "Untitled course")
 
-            if stage in (Status.EXTRACTING, Status.BUILDING_CURRICULUM, Status.GENERATING_SLIDES):
-                stage = Status.GENERATING_SLIDES
-                write_meta(lesson_id, status=stage, course=course_name)
-                slideshow = run_slideshow_generation(curriculum, lesson_id)
-                if "error" in slideshow:
-                    raise RuntimeError(f"Slideshow generation failed: {slideshow['error']}")
-                slideshow = run_animation_generation(slideshow, lesson_id)
-            else:
-                slideshow = json.load(open(lesson_path(lesson_id, "slideshow.json"), encoding="utf-8"))
+        if stage in (Status.EXTRACTING, Status.BUILDING_CURRICULUM, Status.GENERATING_SLIDES):
+            stage = Status.GENERATING_SLIDES
+            write_meta(lesson_id, status=stage, course=course_name)
+            slideshow = run_slideshow_generation(curriculum, lesson_id)
+            if "error" in slideshow:
+                raise RuntimeError(f"Slideshow generation failed: {slideshow['error']}")
+            slideshow = run_animation_generation(slideshow, lesson_id)
+        else:
+            slideshow = json.load(open(lesson_path(lesson_id, "slideshow.json"), encoding="utf-8"))
 
-            slide_count = slideshow.get("slideshow", {}).get("total_slides", 0)
-            write_meta(lesson_id, status=Status.READY, slide_count=slide_count)
+        slide_count = slideshow.get("slideshow", {}).get("total_slides", 0)
+        write_meta(lesson_id, status=Status.READY, slide_count=slide_count)
 
-        except Exception as e:
-            traceback.print_exc()
-            write_meta(lesson_id, status=Status.FAILED, failed_stage=stage, error=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        write_meta(lesson_id, status=Status.FAILED, failed_stage=stage, error=str(e))
+
+start_workers(_run_pipeline, num_workers=PIPELINE_CONCURRENCY)
 
 # summary endpoint for whole student Progress page
 @app.route("/api/progress")
@@ -737,10 +734,13 @@ def create_lesson():
 
     write_meta(lesson_id, status=Status.QUEUED, source_filename=f.filename)
 
+    """
     thread = threading.Thread(
         target=_run_pipeline, args=(lesson_id, saved_path, f.filename), daemon=True
     )
     thread.start()
+    """
+    enqueue_job(lesson_id, saved_path, f.filename)
 
     return jsonify({"lesson_id": lesson_id}), 202
 
