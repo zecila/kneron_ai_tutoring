@@ -759,7 +759,11 @@ function renderConceptProgress(concept) {
     const timePart = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase();
     return `${datePart} ${timePart}`;
   };
-  
+
+  const attemptRows = runList.map((r, i) =>
+    `<div class="progress-history-row" data-concept-id="${concept.conceptId}" data-idx="${i}"><span>Attempt ${i + 1}: ${fmt(r)}</span><span class="progress-history-timestamp">Submitted at ${fmtSubmittedAt(r.at)}</span></div>`
+  ).join("");
+
   const html = `
     <div class="progress-concept-row">
       <div class="progress-concept-name">${concept.name}</div>
@@ -767,8 +771,8 @@ function renderConceptProgress(concept) {
       ${runList.length > 1 ? `
         <details class="progress-history-dropdown">
           <summary>View all ${runList.length} attempts</summary>
-          ${runList.map((r, i) => `<div class="progress-history-row" data-concept-id="${concept.conceptId}" data-idx="${i}"><span>Attempt ${i + 1}: ${fmt(r)}</span><span class="progress-history-timestamp">Submitted at ${fmtSubmittedAt(r.at)}</span></div>`).join("")}
-        </details>` : ""}
+          ${attemptRows}
+        </details>` : attemptRows}
     </div>`;
 
   return { html, runList };
