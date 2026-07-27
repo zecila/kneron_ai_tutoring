@@ -28,11 +28,14 @@ from db import (
     get_lesson_progress, create_user, get_user_by_email, claim_session, 
     create_lesson_owner, get_lessons_for_owner, owns_lesson, get_db,
     get_user_by_email, update_user_password, owns_lesson, get_db, delete_lesson,
-    delete_user, get_lesson_ids_for_user
+    delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
+    get_max_batch, deactivate_batch, get_active_quiz_questions, 
+    save_item, unsave_item, get_saved_items
 )
 
 from pipeline.text_extraction import run_text_extraction
 from pipeline.llm_curriculum_graph import run_curriculum_extraction
+from pipeline.quiz_generation import generate_quiz_batch
 from pipeline.slideshow_generation import run_slideshow_generation
 from pipeline.animation_generation import run_animation_generation
 from pipeline_queue import enqueue_job, start_workers
@@ -378,54 +381,26 @@ def retry_lesson(lesson_id):
     write_meta(lesson_id, status=failed_stage, error=None)
     enqueue_job(lesson_id, file_path, meta.get("source_filename", ""), resume_from=failed_stage, priority=0)
     return jsonify({"status": "retrying"}), 202
-    
 
-@app.route("/api/lessons/<lesson_id>/quiz-attempt", methods=["POST"])
-def submit_quiz_attempt(lesson_id):
-    user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
-        return jsonify({"error": "Lesson not found"}), 404
-    body = request.get_json(force=True)
-    concept_id     = body["concept_id"]
-    question_index = body["question_index"]
-    answer_given    = body.get("answer_given")
-
+def _regenerate_quiz_batch(lesson_id, concept_id):
     try:
         with open(lesson_path(lesson_id, "extracted_concepts.json"), "r", encoding="utf-8") as f:
             curriculum = json.load(f)
-    except FileNotFoundError:
-        return jsonify({"error": "Lesson not found"}), 404
+        concept = next(
+            c for c in curriculum["curriculum_graph"]["concepts"] if c["concept_id"] == concept_id
+        )
+        questions = generate_quiz_batch(
+            concept["name"], concept["description"], concept["study"]["key_terms"],
+            lesson_id, concept_id
+        )
+        next_batch = get_max_batch(lesson_id, concept_id) + 1
+        insert_quiz_questions(lesson_id, concept_id, questions, generation_batch=next_batch)
+        deactivate_batch(lesson_id, concept_id, next_batch - 1)
+    except Exception as e:
+        traceback.print_exc()
+        # regen failure just means the student keeps seeing the batch they
+        # already took — not ideal, but no route is left in a broken state
 
-    concept = next(
-        (c for c in curriculum["curriculum_graph"]["concepts"] if c["concept_id"] == concept_id),
-        None
-    )
-    if concept is None:
-        return jsonify({"error": "Unknown concept_id"}), 404
-
-    for a in body["attempts"]:
-        questions = concept["study"]["quiz_questions"]
-        if not (0 <= a["question_index"] < len(questions)):
-            continue  # skip invalid indices rather than failing the whole batch
-        question = questions[a["question_index"]]
-
-    if not (0 <= a["question_index"] < len(questions)):
-        return jsonify({"error": "Invalid question_index"}), 400
-    question = questions[a["question_index"]]
-
-    if question["type"] == "short_answer":
-        return jsonify({"error": "short_answer questions are not graded"}), 400
-    correct_answer = question["answer"]
-    is_correct = str(answer_given).strip().lower() == str(correct_answer).strip().lower()
-
-    record_quiz_attempt(
-        session_id=session_id, user_id=user_id, lesson_id=lesson_id,
-        concept_id=concept_id, question_index=question_index,
-        question_text=question["question"], answer_given=answer_given,
-        correct_answer=correct_answer, is_correct=is_correct,
-    )
-
-    return jsonify({"correct": is_correct, "correct_answer": correct_answer})
 
 @app.route("/api/lessons/<lesson_id>/quiz-attempt-batch", methods=["POST"])
 def submit_quiz_batch(lesson_id):
@@ -433,31 +408,50 @@ def submit_quiz_batch(lesson_id):
     if not owns_lesson(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     body = request.get_json(force=True)
-    concept_id = body["concept_id"]
-
-    try:
-        with open(lesson_path(lesson_id, "extracted_concepts.json"), "r", encoding="utf-8") as f:
-            curriculum = json.load(f)
-    except FileNotFoundError:
-        return jsonify({"error": "Lesson not found"}), 404
-    
-    concept = next((c for c in curriculum["curriculum_graph"]["concepts"] if c["concept_id"] == concept_id), None)
-    if concept is None:
-        return jsonify({"error": "Unknown concept_id"}), 404
+    is_review = bool(body.get("review"))
 
     batch_timestamp = datetime.now(timezone.utc).isoformat()
+    touched_concept_ids = set()
     for a in body["attempts"]:
-        question = concept["study"]["quiz_questions"][a["question_index"]]
+        question = get_quiz_question(a["question_id"])
+        if question is None or question["lesson_id"] != lesson_id:
+            continue
+        concept_id = question["concept_id"]
         correct_answer = question["answer"]
         answer_given = a.get("answer_given")
         is_correct = str(answer_given).strip().lower() == str(correct_answer).strip().lower()
+        touched_concept_ids.add(concept_id)
+
+        if is_review:
+            continue
+
         record_quiz_attempt(
             session_id=session_id, user_id=user_id, lesson_id=lesson_id, concept_id=concept_id,
-            question_index=a["question_index"], question_text=question["question"],
-            answer_given=answer_given, correct_answer=correct_answer, is_correct=is_correct,
+            question_id=a["question_id"], question_text=question["question_text"],
+            answer_given=answer_given, correct_answer=correct_answer,
+            explanation=question["explanation"], is_correct=is_correct,
             submitted_at=batch_timestamp,
         )
+
+    if not is_review:
+        for concept_id in touched_concept_ids:
+            threading.Thread(
+                target=_regenerate_quiz_batch, args=(lesson_id, concept_id), daemon=True
+            ).start()
+
     return jsonify({"ok": True})
+
+
+@app.route("/api/lessons/<lesson_id>/concepts/<concept_id>/quiz")
+def get_concept_quiz(lesson_id, concept_id):
+    user_id, session_id = current_identity()
+    if not owns_lesson(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+    questions = get_active_quiz_questions(lesson_id, concept_id)
+    # choices is stored as a JSON string in the DB column — decode before sending
+    for q in questions:
+        q["choices"] = json.loads(q["choices"]) if q["choices"] else None
+    return jsonify(questions)
 
 
 @app.route("/api/lessons/<lesson_id>/quiz-history")
@@ -468,6 +462,32 @@ def quiz_history(lesson_id):
     concept_id = request.args.get("concept_id")
     history = get_quiz_history(user_id=user_id, session_id=session_id, lesson_id=lesson_id, concept_id=concept_id)
     return jsonify(history)
+
+@app.route("/api/lessons/<lesson_id>/saved-items", methods=["GET"])
+def list_saved_items(lesson_id):
+    user_id, session_id = current_identity()
+    if not owns_lesson(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+    return jsonify(get_saved_items(session_id, lesson_id, user_id))
+
+
+@app.route("/api/lessons/<lesson_id>/saved-items/<item_id>", methods=["POST"])
+def add_saved_item(lesson_id, item_id):
+    user_id, session_id = current_identity()
+    if not owns_lesson(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+    body = request.get_json(force=True)
+    save_item(session_id, lesson_id, item_id, body["item_type"], user_id, body.get("content"))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lessons/<lesson_id>/saved-items/<item_id>", methods=["DELETE"])
+def remove_saved_item(lesson_id, item_id):
+    user_id, session_id = current_identity()
+    if not owns_lesson(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+    unsave_item(session_id, lesson_id, item_id)
+    return jsonify({"ok": True})
     
 # ── Info card routes ──────────────────────────────────────────────────────────
 @app.route("/api/lessons/<lesson_id>/info/definition", methods=["POST"])
@@ -655,6 +675,12 @@ def _run_pipeline(lesson_id: str, file_path: str, original_filename: str, resume
             stage = Status.BUILDING_CURRICULUM
             write_meta(lesson_id, status=stage)
             curriculum = run_curriculum_extraction(normalized, lesson_id)
+            for concept in curriculum["curriculum_graph"]["concepts"]:
+                questions = generate_quiz_batch(
+                    concept["name"], concept["description"], concept["study"]["key_terms"],
+                    lesson_id, concept["concept_id"]
+                )
+                insert_quiz_questions(lesson_id, concept["concept_id"], questions, generation_batch=0)
         else:
             curriculum = json.load(open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8"))
         course_name = curriculum.get("curriculum_graph", {}).get("course", "Untitled course")
