@@ -99,6 +99,6 @@ Generate the quiz questions for this concept.
             raise ValueError(f"Answer not among choices: {q['answer']!r} not in {q['choices']}")
         if q["type"] == "true_false" and set(q["choices"]) != {"True", "False"}:
             raise ValueError(f"true_false choices must be ['True','False'], got {q['choices']}")
-		if q["type"] == "multiple_choice":
+        if q["type"] == "multiple_choice":
             random.shuffle(q["choices"])
     return questions
