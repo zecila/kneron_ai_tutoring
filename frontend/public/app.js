@@ -653,17 +653,32 @@ function doGoHome() {
 
 // ─── Student Progress Section  ────────────────────────────────────────────────────────────
 
+function renderAttemptDetail(conceptName, attempts) {
+  document.getElementById("attempt-detail-heading").textContent = conceptName;
+  const panel = document.getElementById("attempt-detail-content");
+
+  const fakeState = { answers: new Map(attempts.map(a => [a.question_id, a.answer_given])) };
+  const fakeQuestions = attempts.map(a => ({
+    question_id: a.question_id,
+    question_text: a.question_text,
+    answer: a.correct_answer,
+    explanation: a.explanation
+  }));
+
+  renderQuizResults({ concept_id: null }, panel, fakeState, fakeQuestions, true);
+}
+
 async function loadProgressPage() {
   const el = document.getElementById("progress-content");
   el.innerHTML = `<h1 class="lessons-page-heading">My Progress</h1>` + "<p>Loading…</p>";
   const res = await fetch("/api/progress");
   const data = await res.json();
 
-  el.innerHTML = `<h1 class="lessons-page-heading">My Progress</h1>`;;
+  el.innerHTML = `<h1 class="lessons-page-heading">My Progress</h1>`;
   data.forEach(({ lesson, progress, quiz_history }) => {
     const byConceptScore = {};
     quiz_history.forEach(h => {
-      byConceptScore[h.concept_id] ??= { name: h.concept_name, attempts: [] };
+      byConceptScore[h.concept_id] ??= { name: h.concept_name, conceptId: h.concept_id, attempts: [] };
       byConceptScore[h.concept_id].attempts.push(h);
     });
 
@@ -690,18 +705,36 @@ async function loadProgressPage() {
 
     const conceptsWithScores = latestScores.length;
     const showToggle = conceptsWithScores > 1;
+
+    // render each concept once, keep its runList around for click wiring below
+    const conceptRenders = Object.values(byConceptScore).map(renderConceptProgress);
+
     card.innerHTML = `
       ${showToggle ? `<button class="progress-card-toggle" aria-label="Collapse lesson">▾</button>` : ""}
       <h3>${lesson.course || lesson.source_filename}</h3>
       <p class="progress-slides">${progress.completed ? "Completed" : pct}</p>
       <p class="progress-avg-score">${avgScore}</p>
       <div class="progress-card-body">
-        ${Object.values(byConceptScore).map(renderConceptProgress).join("")}
+        ${conceptRenders.map(r => r.html).join("")}
       </div>`;
+
     const toggleBtn = card.querySelector(".progress-card-toggle");
     if (toggleBtn) {
       toggleBtn.onclick = () => card.classList.toggle("collapsed");
     }
+
+    // wire attempt-row clicks using the runLists we already computed above
+    Object.values(byConceptScore).forEach((concept, idx) => {
+      const { runList } = conceptRenders[idx];
+      card.querySelectorAll(`.progress-history-row[data-concept-id="${concept.conceptId}"]`).forEach((row, i) => {
+        row.onclick = () => {
+          const idx2 = Number(row.dataset.idx);
+          renderAttemptDetail(concept.name, runList[idx2].attempts);
+          switchScene("attempt-detail");
+        };
+      });
+    });
+
     el.appendChild(card);
   });
 }
@@ -710,9 +743,10 @@ function renderConceptProgress(concept) {
   // group attempts by submitted_at (batch = one quiz run), score each run
   const runs = {};
   concept.attempts.forEach(a => {
-    runs[a.submitted_at] ??= { correct: 0, total: 0, at: a.submitted_at };
+    runs[a.submitted_at] ??= { correct: 0, total: 0, at: a.submitted_at, attempts: [] };
     runs[a.submitted_at].total++;
     if (a.is_correct) runs[a.submitted_at].correct++;
+    runs[a.submitted_at].attempts.push(a);
   });
   const runList = Object.values(runs).sort((a, b) => a.at.localeCompare(b.at));
   const latest = runList[runList.length - 1];
@@ -720,16 +754,18 @@ function renderConceptProgress(concept) {
 
   const fmt = r => `${r.correct}/${r.total} (${Math.round((r.correct / r.total) * 100)}%)`;
 
-  return `
+  const html = `
     <div class="progress-concept-row">
       <div class="progress-concept-name">${concept.name}</div>
       <div class="progress-concept-summary">Latest: ${fmt(latest)} · Best: ${fmt(best)}</div>
       ${runList.length > 1 ? `
         <details class="progress-history-dropdown">
           <summary>View all ${runList.length} attempts</summary>
-          ${runList.map((r, i) => `<div class="progress-history-row">Attempt ${i + 1}: ${fmt(r)}</div>`).join("")}
+          ${runList.map((r, i) => `<div class="progress-history-row" data-concept-id="${concept.conceptId}" data-idx="${i}">Attempt ${i + 1}: ${fmt(r)}</div>`).join("")}
         </details>` : ""}
     </div>`;
+
+  return { html, runList };
 }
 
 // ─── Screen manager ───────────────────────────────────────────────────────────
@@ -2287,7 +2323,7 @@ function goBackFromProgress() {
 }
 
 function switchScene(name) {
-  if (name !== "progress" && name !== "lessons" && name !== "account") lastScene = name; // track last scene for Back button
+  if (name !== "progress" && name !== "lessons" && name !== "account" && name !== "attempt-detail") lastScene = name; // track last scene for Back button
 
   if (name === "study" || name === "slideshow") {
     const url = new URL(window.location);
@@ -2321,6 +2357,10 @@ function switchScene(name) {
       autoPlayTimer = null;
     }
     ttsRequestId++;
+  } else if (name === "progress" || name === "lessons" || name === "attempt-detail") {
+    if (currentAudio) { currentAudio.pause(); audioPaused = true; }
+    if (autoPlayTimer) { clearTimeout(autoPlayTimer); autoPlayTimer = null; }
+    ttsRequestId++;
   } else {
     // Leaving the lesson context entirely (Account, Auth, etc.)
     // wipe narration instead of just pausing it
@@ -2330,6 +2370,7 @@ function switchScene(name) {
   document.getElementById("slideshow").classList.toggle("hidden", name !== "slideshow");
   document.getElementById("study").classList.toggle("hidden", name !== "study");
   document.getElementById("progress-screen").classList.toggle("hidden", name !== "progress");
+  document.getElementById("attempt-detail-screen").classList.toggle("hidden", name !== "attempt-detail");  
   document.getElementById("welcome-screen").classList.toggle("hidden", name !== "welcome");
   document.getElementById("auth-screen")?.classList.toggle("hidden", name !== "auth");
   document.getElementById("lessons-screen").classList.toggle("hidden", name !== "lessons");
@@ -2366,6 +2407,7 @@ function switchScene(name) {
 
 // ─── Saved items state ─────────────────────────────────────────────────────
 let savedItems = new Set(); // stores unique string IDs
+const savedQuizContent = new Map(); // itemId -> full question object, captured at star-time so it survives batch regeneration
 
 function makeItemId(type, conceptId, idx) {
   return `${type}:${conceptId}:${idx}`;
@@ -2375,10 +2417,18 @@ function isSaved(id) {
   return savedItems.has(id);
 }
 
-function toggleSaved(id) {
-  if (savedItems.has(id)) savedItems.delete(id);
-  else savedItems.add(id);
-  buildConceptNav(); // rebuild nav in case "Saved" needs to appear/disappear
+function toggleSaved(id, quizQuestion) {
+  if (savedItems.has(id)) {
+    savedItems.delete(id);
+    savedQuizContent.delete(id);
+  } else {
+    savedItems.add(id);
+    if (quizQuestion) savedQuizContent.set(id, quizQuestion);
+  }
+  buildConceptNav();
+  if (activeConceptId === "__saved__" && savedItems.size === 0) {
+    selectConcept("__all__"); // bounce back if Saved becomes empty
+  }
 }
 
 
@@ -2388,6 +2438,8 @@ async function loadCurriculum() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     curriculum = data.curriculum_graph;
+
+    await loadSavedItems();
 
     document.getElementById("study-course-name").textContent = curriculum.course;
     buildConceptNav();
@@ -2533,11 +2585,8 @@ function buildSavedConcept() {
       const id = makeItemId("flashcard", concept.concept_id, idx);
       if (isSaved(id)) flashcards.push({ ...fc, _savedId: id });
     });
-    (concept.study?.quiz_questions || []).forEach((q, idx) => {
-      const id = makeItemId("quiz", concept.concept_id, idx);
-      if (isSaved(id)) quizzes.push({ ...q, _savedId: id });
-    });
   });
+  savedQuizContent.forEach((q, id) => quizzes.push({ ...q, _savedId: id }));
 
   return {
     concept_id: "__saved__",
@@ -2546,6 +2595,38 @@ function buildSavedConcept() {
     importance: "all",
     study: { key_terms, formulas, flashcards, quiz_questions: quizzes }
   };
+}
+
+async function loadSavedItems() {
+  const res = await fetch(`/api/lessons/${lessonId}/saved-items`);
+  const items = await res.json();
+  savedItems = new Set(items.map(i => i.item_id));
+  savedQuizContent.clear();
+  items.filter(i => i.item_type === "quiz" && i.content)
+       .forEach(i => savedQuizContent.set(i.item_id, i.content));
+}
+
+function toggleSaved(id, quizQuestion) {
+  if (savedItems.has(id)) {
+    savedItems.delete(id);
+    savedQuizContent.delete(id);
+    fetch(`/api/lessons/${lessonId}/saved-items/${id}`, { method: "DELETE" })
+      .catch(err => console.warn("Could not unsave item:", err.message));
+  } else {
+    savedItems.add(id);
+    if (quizQuestion) savedQuizContent.set(id, quizQuestion);
+    const itemType = id.split(":")[0];
+    fetch(`/api/lessons/${lessonId}/saved-items/${id}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_type: itemType, content: quizQuestion ?? null })
+    }).catch(err => console.warn("Could not save item:", err.message));
+  }
+
+  buildConceptNav();
+  if (activeConceptId === "__saved__" && savedItems.size === 0) {
+    selectConcept("__all__"); // bounce back if Saved becomes empty
+  }
 }
 
 function selectConcept(id) {
@@ -2696,13 +2777,30 @@ function buildAllConcept() {
   };
 }
 
-function toggleSaved(id) {
-  if (savedItems.has(id)) savedItems.delete(id);
-  else savedItems.add(id);
-  buildConceptNav();
-  if (activeConceptId === "__saved__" && savedItems.size === 0) {
-    selectConcept("__all__"); // bounce back if Saved becomes empty
+// ─── Quiz question cache: avoid re-fetching every time the panel re-renders ──
+const quizQuestionsCache = new Map(); // concept_id -> questions array
+
+async function fetchQuizQuestions(conceptId) {
+  if (conceptId === "__saved__") {
+    return Array.from(savedQuizContent, ([id, q]) => ({ ...q, _savedId: id }));
   }
+  if (quizQuestionsCache.has(conceptId)) return quizQuestionsCache.get(conceptId);
+  let questions;
+  if (conceptId === "__all__") {
+    const perConcept = await Promise.all(
+      curriculum.concepts.map(c => fetchQuizQuestions(c.concept_id))
+    );
+    questions = perConcept.flat();
+  } else {
+    const res = await fetch(`/api/lessons/${lessonId}/concepts/${conceptId}/quiz`);
+    questions = await res.json();
+  }
+  quizQuestionsCache.set(conceptId, questions);
+  return questions;
+}
+
+function invalidateQuizCache(conceptId) {
+  quizQuestionsCache.delete(conceptId);
 }
 
 function renderStudyPanel(concept, mode, panel) {
@@ -2862,168 +2960,196 @@ function renderStudyPanel(concept, mode, panel) {
   }
 
   if (mode === "quiz") {
-    if (!s.quiz_questions?.length) {
-      panel.innerHTML = `<p class="empty-state">No quiz questions for this concept.</p>`;
-      return;
-    }
-
     const conceptId = concept.concept_id;
     const state = getQuizState(conceptId);
-    let qIndex = 0;
 
     if (state.completed) {
-      renderQuizResults(concept, panel, state);
+      renderQuizResults(concept, panel, state, state.questions);
       return;
     }
 
-    const renderQ = () => {
-      panel.innerHTML = "";
-      const q = s.quiz_questions[qIndex];
-
-      // ── Header ──
-      const header = document.createElement("div");
-      header.className = "quiz-header";
-
-      const counter = document.createElement("div");
-      counter.className = "card-counter";
-      counter.textContent = `Question ${qIndex + 1} / ${s.quiz_questions.length}`;
-
-      const jump = buildJumpDropdown(
-        () => s.quiz_questions.map((q, i) => `Q${i + 1}: ${q.question.slice(0, 28)}${q.question.length > 28 ? "…" : ""}`),
-        () => qIndex,
-        (i) => { qIndex = i; renderQ(); }
-      );
-
-      header.appendChild(counter);
-      header.appendChild(jump);
-      panel.appendChild(header);
-
-      // ── Question row ──
-      const qRow = document.createElement("div");
-      qRow.className = "quiz-question-row";
-
-      const qText = document.createElement("p");
-      qText.className = "quiz-question";
-      qText.textContent = q.question;
-
-      const itemId = q._savedId || makeItemId("quiz", conceptId, qIndex);
-      const bookmark = buildBannerButton(itemId);
-      qRow.appendChild(qText);
-      qRow.appendChild(bookmark);
-      panel.appendChild(qRow);
-
-      // ── Submit row — defined early so updateSubmitBtn is available ──
-      const submitRow = document.createElement("div");
-      submitRow.className = "quiz-submit-row";
-
-      const submitBtn = document.createElement("button");
-      submitBtn.className = "quiz-submit-btn";
-      submitBtn.textContent = "Submit Quiz";
-      submitBtn.onclick = () => {
-        state.completed = true;
-        submitQuizBatch(concept, s.quiz_questions, state);
-        renderQuizResults(concept, panel, state);
-      };
-      submitRow.appendChild(submitBtn);
-
-      const updateSubmitBtn = () => {
-        const allAnswered = state.answers.size === s.quiz_questions.length;
-        submitRow.classList.toggle("hidden", !allAnswered);
-      };
-
-      // ── Answer controls ──
-      const savedAnswer = state.answers.get(qIndex);
-
-      const handleSelect = (chosen, btn, allBtns) => {
-        // Update state
-        state.answers.set(qIndex, chosen);
-
-        // Update button visual — just "selected", no correct/wrong yet
-        allBtns.forEach(b => b.classList.remove("choice-selected"));
-        btn.classList.add("choice-selected");
-
-        updateSubmitBtn();
-      };
-
-      const buildChoiceButtons = (choices) => {
-        const btns = [];
-        choices.forEach(choice => {
-          const btn = document.createElement("button");
-          btn.className = "choice-btn";
-          btn.textContent = choice;
-          btn.dataset.choice = choice;
-
-          // Restore selected state if already answered
-          if (choice === savedAnswer) {
-            btn.classList.add("choice-selected");
-          }
-
-          btn.onclick = () => handleSelect(choice, btn, btns);
-          panel.appendChild(btn);
-          btns.push(btn);
-        });
-      };
-
-      if (q.type === "multiple_choice" && q.choices?.length) {
-        buildChoiceButtons(q.choices);
-      } else if (q.type === "true_false") {
-        buildChoiceButtons(["True", "False"]);
-      } else {
-        // Short answer — text input
-        const inputWrapper = document.createElement("div");
-        inputWrapper.className = "short-answer-wrapper";
-
-        const input = document.createElement("textarea");
-        input.className = "short-answer-input";
-        input.placeholder = "Type your answer here...";
-        input.rows = 3;
-
-        // Restore saved answer if exists
-        if (savedAnswer !== undefined) {
-          input.value = savedAnswer;
-        }
-
-        // Save answer to state on every keystroke
-        input.addEventListener("input", () => {
-          const val = input.value.trim();
-          if (val) {
-            state.answers.set(qIndex, input.value); // store raw value
-          } else {
-            state.answers.delete(qIndex);
-          }
-          updateSubmitBtn();
-        });
-
-        inputWrapper.appendChild(input);
-        panel.appendChild(inputWrapper);
+    panel.innerHTML = `<p class="empty-state">Loading quiz…</p>`;
+    fetchQuizQuestions(conceptId).then(questions => {
+      if (!questions.length) {
+        panel.innerHTML = `<p class="empty-state">No quiz questions for this concept.</p>`;
+        return;
       }
+      startQuiz(concept, questions, panel, state);
+    });
+  }
+}
 
-      // ── Nav ──
-      const nav = document.createElement("div");
-      nav.className = "card-nav";
+function startQuiz(concept, questions, panel, state) {
+  const conceptId = concept.concept_id;
+  const isReviewOnly = conceptId === "__saved__";
+  let qIndex = 0;
 
-      const prevBtn = document.createElement("button");
-      prevBtn.className = "card-btn";
-      prevBtn.textContent = "← Prev";
-      prevBtn.disabled = qIndex === 0;
-      prevBtn.onclick = () => { qIndex--; renderQ(); };
+  const renderQ = () => {
+    panel.innerHTML = "";
+    const q = questions[qIndex];
 
-      const nextBtn = document.createElement("button");
-      nextBtn.className = "card-btn";
-      nextBtn.textContent = "Next →";
-      nextBtn.disabled = qIndex === s.quiz_questions.length - 1;
-      nextBtn.onclick = () => { qIndex++; renderQ(); };
+    // ── Header ──
+    const header = document.createElement("div");
+    header.className = "quiz-header";
 
-      nav.appendChild(prevBtn);
-      nav.appendChild(nextBtn);
-      panel.appendChild(nav);
-      panel.appendChild(submitRow);
+    const counter = document.createElement("div");
+    counter.className = "card-counter";
+    counter.textContent = `Question ${qIndex + 1} / ${questions.length}`;
 
-      updateSubmitBtn();
+    const jump = buildJumpDropdown(
+      () => questions.map((q, i) => `Q${i + 1}: ${q.question_text.slice(0, 28)}${q.question_text.length > 28 ? "…" : ""}`),
+      () => qIndex,
+      (i) => { qIndex = i; renderQ(); }
+    );
+
+    header.appendChild(counter);
+    header.appendChild(jump);
+    panel.appendChild(header);
+
+    // ── Question row ──
+    const qRow = document.createElement("div");
+    qRow.className = "quiz-question-row";
+
+    const qText = document.createElement("p");
+    qText.className = "quiz-question";
+    qText.textContent = q.question_text;
+
+    const itemId = q._savedId || makeItemId("quiz", conceptId, q.question_id);
+    const bookmark = buildBannerButton(itemId, q);
+    qRow.appendChild(qText);
+    qRow.appendChild(bookmark);
+    panel.appendChild(qRow);
+
+    // ── Submit row ──
+    const submitRow = document.createElement("div");
+    submitRow.className = "quiz-submit-row";
+
+    const submitBtn = document.createElement("button");
+    submitBtn.className = "quiz-submit-btn";
+    submitBtn.textContent = "Submit Quiz";
+    submitBtn.onclick = () => {
+      state.completed = true;
+      state.questions = questions;   // persist so results can be re-rendered later without re-fetching
+      const isReview = conceptId === "__saved__";
+      submitQuizBatch(concept, questions, state, isReview);
+      // "All concepts" merges several real concepts' questions — invalidate each
+      // one's cache (its batch is being regenerated server-side) plus the
+      // aggregate itself, so nothing here re-serves a stale merged batch either.
+      // Saved-section submissions don't trigger regeneration server-side at all,
+      // so there's no cache to invalidate.
+      if (!isReview) {
+        const touchedConceptIds = conceptId === "__all__"
+          ? [...new Set(questions.map(q => q.concept_id))]
+          : [conceptId];
+        touchedConceptIds.forEach(invalidateQuizCache);
+        invalidateQuizCache("__all__");
+      }
+      renderQuizResults(concept, panel, state, questions);
+    };
+    submitRow.appendChild(submitBtn);
+
+    const updateSubmitBtn = () => {
+      const allAnswered = state.answers.size === questions.length;
+      submitRow.classList.toggle("hidden", !allAnswered);
     };
 
-    renderQ();
-  }
+    // ── Answer controls ──
+    const savedAnswer = state.answers.get(q.question_id);
+    const alreadyRevealed = isReviewOnly && savedAnswer !== undefined;
+
+    const feedback = document.createElement("div");
+    feedback.className = "quiz-review-feedback";
+
+    const showFeedback = (chosen) => {
+      const isCorrect = chosen.toLowerCase() === q.answer.toLowerCase();
+      feedback.className = `quiz-results-row ${isCorrect ? "results-correct" : "results-wrong"}`;
+      feedback.innerHTML = "";
+
+      const icon = document.createElement("span");
+      icon.className = "results-icon";
+      icon.textContent = isCorrect ? "✓" : "✗";
+
+      const content = document.createElement("div");
+      content.className = "results-content";
+
+      const yourAnswer = document.createElement("div");
+      yourAnswer.className = `results-your-answer ${isCorrect ? "results-your-answer-correct" : "results-your-answer-wrong"}`;
+      yourAnswer.textContent = `Your answer: ${chosen}`;
+      content.appendChild(yourAnswer);
+
+      if (!isCorrect) {
+        const correctAnswer = document.createElement("div");
+        correctAnswer.className = "results-correct-answer";
+        correctAnswer.textContent = `Correct: ${q.answer}`;
+        content.appendChild(correctAnswer);
+      }
+      if (q.explanation) {
+        const explanation = document.createElement("div");
+        explanation.className = "results-explanation";
+        explanation.textContent = q.explanation;
+        content.appendChild(explanation);
+      }
+
+      feedback.appendChild(icon);
+      feedback.appendChild(content);
+    };
+
+    const handleSelect = (chosen, btn, allBtns) => {
+      state.answers.set(q.question_id, chosen);
+      allBtns.forEach(b => b.classList.remove("choice-selected"));
+      btn.classList.add("choice-selected");
+      if (isReviewOnly) {
+        allBtns.forEach(b => b.disabled = true); // lock in the pick, this isn't a re-answerable drill
+        showFeedback(chosen);
+      } else {
+        updateSubmitBtn();
+      }
+    };
+
+    const buildChoiceButtons = (choices) => {
+      const btns = [];
+      choices.forEach(choice => {
+        const btn = document.createElement("button");
+        btn.className = "choice-btn";
+        btn.textContent = choice;
+        btn.dataset.choice = choice;
+        if (choice === savedAnswer) btn.classList.add("choice-selected");
+        if (alreadyRevealed) btn.disabled = true;
+        btn.onclick = () => handleSelect(choice, btn, btns);
+        panel.appendChild(btn);
+        btns.push(btn);
+      });
+    };
+
+    buildChoiceButtons(q.choices);
+    if (alreadyRevealed) showFeedback(savedAnswer);
+    panel.appendChild(feedback);
+
+    // ── Nav ──
+    const nav = document.createElement("div");
+    nav.className = "card-nav";
+
+    const prevBtn = document.createElement("button");
+    prevBtn.className = "card-btn";
+    prevBtn.textContent = "← Prev";
+    prevBtn.disabled = qIndex === 0;
+    prevBtn.onclick = () => { qIndex--; renderQ(); };
+
+    const nextBtn = document.createElement("button");
+    nextBtn.className = "card-btn";
+    nextBtn.textContent = "Next →";
+    nextBtn.disabled = qIndex === questions.length - 1;
+    nextBtn.onclick = () => { qIndex++; renderQ(); };
+
+    nav.appendChild(prevBtn);
+    nav.appendChild(nextBtn);
+    panel.appendChild(nav);
+    if (!isReviewOnly) panel.appendChild(submitRow);
+
+    updateSubmitBtn();
+  };
+
+  renderQ();
 }
 
 function buildJumpDropdown(getLabels, getCurrent, onSelect) {
@@ -3082,7 +3208,7 @@ function buildStarButton(itemId) {
   return star;
 }
 
-function buildBannerButton(itemId) {
+function buildBannerButton(itemId, quizQuestion) {
   const BOOKMARK_OUTLINE = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
   const BOOKMARK_FILLED  = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>`;
   
@@ -3093,7 +3219,7 @@ function buildBannerButton(itemId) {
   btn.setAttribute("aria-label", "Save this question");
   btn.onclick = (e) => {
     e.stopPropagation();
-    toggleSaved(itemId);
+    toggleSaved(itemId, quizQuestion);
     const nowSaved = isSaved(itemId);
     btn.classList.toggle("banner-active", nowSaved);
     btn.innerHTML = nowSaved ? BOOKMARK_FILLED : BOOKMARK_OUTLINE;
@@ -3124,37 +3250,29 @@ function sectionHeading(text) {
   return h;
 }
 
-function submitQuizBatch(concept, questions, state) {
-  const attempts = [];
-  questions.forEach((q, i) => {
-    if (q.type === "short_answer") return;
-    attempts.push({ question_index: i, answer_given: state.answers.get(i) ?? null });
-  });
+function submitQuizBatch(concept, questions, state, isReview = false) {
+  const attempts = questions.map(q => ({
+    question_id: q.question_id,
+    answer_given: state.answers.get(q.question_id) ?? null
+  }));
   if (!attempts.length) return;
 
   fetch(`/api/lessons/${lessonId}/quiz-attempt-batch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ concept_id: concept.concept_id, attempts })
+    body: JSON.stringify({ attempts, review: isReview })
   }).catch(err => console.warn("Could not save quiz attempt:", err.message));
 }
 
-function renderQuizResults(concept, panel, state) {
-  const s = concept.study;
-  const questions = s.quiz_questions;
+function renderQuizResults(concept, panel, state, questions, readOnly = false) {
   panel.innerHTML = "";
 
-  // Score
   let correct = 0;
-  let gradeable = 0;
-  questions.forEach((q, i) => {
-    if (q.type === "short_answer") return;
-    gradeable++;
-    const chosen = state.answers.get(i);
+  questions.forEach(q => {
+    const chosen = state.answers.get(q.question_id);
     if (chosen?.toLowerCase() === q.answer.toLowerCase()) correct++;
   });
-
-  const pct = gradeable > 0 ? Math.round((correct / gradeable) * 100) : null;
+  const pct = Math.round((correct / questions.length) * 100);
 
   const heading = document.createElement("h3");
   heading.className = "study-section-heading";
@@ -3163,76 +3281,55 @@ function renderQuizResults(concept, panel, state) {
 
   const scoreCard = document.createElement("div");
   scoreCard.className = "quiz-results-score";
-  if (pct !== null) {
-    const scoreNum = document.createElement("div");
-    scoreNum.className = "quiz-results-number";
-    scoreNum.textContent = `${pct}%`;
-    const scoreLabel = document.createElement("div");
-    scoreLabel.className = "quiz-results-label";
-    scoreLabel.textContent = `${correct} / ${gradeable} correct`;
-    scoreCard.appendChild(scoreNum);
-    scoreCard.appendChild(scoreLabel);
-  } else {
-    scoreCard.textContent = "All questions revealed — review your answers below.";
-  }
+  const scoreNum = document.createElement("div");
+  scoreNum.className = "quiz-results-number";
+  scoreNum.textContent = `${pct}%`;
+  const scoreLabel = document.createElement("div");
+  scoreLabel.className = "quiz-results-label";
+  scoreLabel.textContent = `${correct} / ${questions.length} correct`;
+  scoreCard.appendChild(scoreNum);
+  scoreCard.appendChild(scoreLabel);
   panel.appendChild(scoreCard);
 
-  // Per-question breakdown with full feedback
   const breakdown = document.createElement("div");
   breakdown.className = "quiz-results-breakdown";
 
   questions.forEach((q, i) => {
-    const chosen = state.answers.get(i);
-    const isShortAnswer = q.type === "short_answer";
-    const isCorrect = !isShortAnswer && chosen?.toLowerCase() === q.answer.toLowerCase();
+    const chosen = state.answers.get(q.question_id);
+    const isCorrect = chosen?.toLowerCase() === q.answer.toLowerCase();
 
     const block = document.createElement("div");
-    block.className = `quiz-results-row ${isShortAnswer ? "results-neutral" : isCorrect ? "results-correct" : "results-wrong"}`;
+    block.className = `quiz-results-row ${isCorrect ? "results-correct" : "results-wrong"}`;
 
     const icon = document.createElement("span");
     icon.className = "results-icon";
-    icon.textContent = isShortAnswer ? "—" : isCorrect ? "✓" : "✗";
+    icon.textContent = isCorrect ? "✓" : "✗";
 
     const content = document.createElement("div");
     content.className = "results-content";
 
     const qText = document.createElement("div");
     qText.className = "results-question";
-    qText.textContent = `${i + 1}. ${q.question}`;
+    qText.textContent = `${i + 1}. ${q.question_text}`;
     content.appendChild(qText);
 
-    if (isShortAnswer) {
+    if (chosen) {
       const yourAnswer = document.createElement("div");
-      yourAnswer.className = "results-your-answer results-your-answer-neutral"; 
-      yourAnswer.textContent = `Your answer: "${chosen || ""}"`;
+      yourAnswer.className = `results-your-answer ${isCorrect ? "results-your-answer-correct" : "results-your-answer-wrong"}`;
+      yourAnswer.textContent = `Your answer: ${chosen}`;
       content.appendChild(yourAnswer);
-
-      const answerEl = document.createElement("div");
-      answerEl.className = "results-correct-answer";
-      answerEl.textContent = `Answer: "${q.answer}"`;
-      content.appendChild(answerEl);
-    } else {
-      // Show chosen answer if wrong
-      if (!isCorrect && chosen) {
-        const yourAnswer = document.createElement("div");
-        yourAnswer.className = "results-your-answer";
-        yourAnswer.textContent = `Your answer: ${chosen}`;
-        content.appendChild(yourAnswer);
-      }
-      // Show correct answer if wrong
-      if (!isCorrect) {
-        const correctAnswer = document.createElement("div");
-        correctAnswer.className = "results-correct-answer";
-        correctAnswer.textContent = `Correct: ${q.answer}`;
-        content.appendChild(correctAnswer);
-      }
-      // Show explanation
-      if (q.explanation) {
-        const explanation = document.createElement("div");
-        explanation.className = "results-explanation";
-        explanation.textContent = q.explanation;
-        content.appendChild(explanation);
-      }
+    }
+    if (!isCorrect) {
+      const correctAnswer = document.createElement("div");
+      correctAnswer.className = "results-correct-answer";
+      correctAnswer.textContent = `Correct: ${q.answer}`;
+      content.appendChild(correctAnswer);
+    }
+    if (q.explanation) {
+      const explanation = document.createElement("div");
+      explanation.className = "results-explanation";
+      explanation.textContent = q.explanation;
+      content.appendChild(explanation);
     }
 
     block.appendChild(icon);
@@ -3242,12 +3339,14 @@ function renderQuizResults(concept, panel, state) {
 
   panel.appendChild(breakdown);
 
-  const retryBtn = document.createElement("button");
-  retryBtn.className = "card-btn";
-  retryBtn.textContent = "Retry Quiz";
-  retryBtn.onclick = () => {
-    resetQuizState(concept.concept_id);
-    renderStudyPanel(concept, "quiz", panel);
-  };
-  panel.appendChild(retryBtn);
+  if (!readOnly) {
+    const retryBtn = document.createElement("button");
+    retryBtn.className = "card-btn";
+    retryBtn.textContent = "Retry Quiz";
+    retryBtn.onclick = () => {
+      resetQuizState(concept.concept_id);
+      renderStudyPanel(concept, "quiz", panel);
+    };
+    panel.appendChild(retryBtn);
+  }
 }

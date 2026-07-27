@@ -135,7 +135,7 @@ For every element with `type: "equation"`:
 Include only content a student would be expected to learn and apply:
 - Skip title slides, table of contents, instructor names, dates, and copyright notices.
 - Skip motivating quotes or anecdotes (they may inform a description but should not
-  generate flashcards or quiz questions).
+  generate flashcards).
 - Extract definitions, theorems, derivations, worked examples, and procedures.
 
 Aim for 8–18 concepts total. Merge concepts that share the same core idea rather than
@@ -164,15 +164,8 @@ Relationship types:
 
 For each concept also generate:
 - 1-4 flashcards (front: question or term, back: answer or definition)
-- 1-4 quiz questions (mix of multiple_choice, true_false)
-- For multiple_choice, always provide 4 choices and indicate the correct answer
 
-For multiple choice questions, all four choices must be plausible. Distractors should
-reflect common misconceptions or superficially similar ideas — not obviously wrong
-answers. All choices should be similar in length, specificity, and grammatical form so
-the correct answer cannot be identified by structure alone.
-
-All generated text — descriptions, explanations, flashcards, and quiz questions —
+All generated text — descriptions, explanations, and flashcards —
 should read as self-contained lesson material. Do not reference the source document.
 Avoid phrases like "as shown in the slide", "in this lecture", "the presenter states",
 or any language that positions the content as derived from an external file.
@@ -183,7 +176,7 @@ JSON FORMATTING RULES — follow these exactly:
 - Do not add a trailing comma after the final element of any object or array.
 - Every string must use double quotes, with internal double quotes escaped as \".
 - Do not truncate output. If the curriculum is large, reduce the number of
-  concepts or trim flashcards/quiz_questions per concept rather than cutting
+  concepts or trim flashcards per concept rather than cutting
   the JSON off mid-structure — the response must always be complete, valid,
   and fully closed.
 - Before returning, mentally verify every opening {{ or [ has a matching
@@ -225,15 +218,6 @@ Return ONLY valid JSON matching this exact schema, no preamble, no markdown:
             {{
               "front": "<question or term>",
               "back": "<answer or definition>"
-            }}
-          ],
-          "quiz_questions": [
-            {{
-              "question": "<question text>",
-              "type": "multiple_choice | true_false",
-              "choices": ["A", "B", "C", "D"],
-              "answer": "<correct answer>",
-              "explanation": "<why this is correct>"
             }}
           ]
         }}

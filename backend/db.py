@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -34,20 +35,6 @@ def init_db():
             created_at      TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS quiz_attempts (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id      TEXT NOT NULL,
-            user_id         INTEGER REFERENCES users(id),
-            lesson_id       TEXT NOT NULL,
-            concept_id      TEXT NOT NULL,
-            question_index  INTEGER NOT NULL,
-            question_text   TEXT NOT NULL,
-            answer_given    TEXT,
-            correct_answer  TEXT NOT NULL,
-            is_correct      INTEGER NOT NULL,
-            submitted_at    TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS lesson_progress (
             session_id          TEXT NOT NULL,
             user_id             INTEGER REFERENCES users(id),
@@ -57,15 +44,71 @@ def init_db():
             updated_at          TEXT NOT NULL,
             PRIMARY KEY (session_id, lesson_id)
         );
+                       
+        CREATE TABLE IF NOT EXISTS quiz_questions (
+            question_id     TEXT PRIMARY KEY,   -- e.g. "c001_q007"
+            concept_id      TEXT NOT NULL,
+            lesson_id       TEXT NOT NULL,
+            question_text   TEXT NOT NULL,
+            type            TEXT NOT NULL,      -- multiple_choice | true_false
+            choices         TEXT,               -- JSON array, null for true_false
+            answer          TEXT NOT NULL,
+            explanation     TEXT,
+            generation_batch INTEGER NOT NULL,  -- increments each regen
+            active          INTEGER DEFAULT 1,
+            created_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS quiz_attempts (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id      TEXT NOT NULL,
+                    user_id         INTEGER REFERENCES users(id),
+                    lesson_id       TEXT NOT NULL,
+                    concept_id      TEXT NOT NULL,
+                    question_id     TEXT NOT NULL REFERENCES quiz_questions(question_id),
+                    question_text   TEXT NOT NULL,
+                    answer_given    TEXT,
+                    correct_answer  TEXT NOT NULL,
+                    explanation     TEXT,
+                    is_correct      INTEGER NOT NULL,
+                    submitted_at    TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS saved_items (
+            session_id      TEXT NOT NULL,
+            user_id         INTEGER REFERENCES users(id),
+            lesson_id       TEXT NOT NULL,
+            item_id         TEXT NOT NULL,
+            item_type       TEXT NOT NULL,     -- keyterm | formula | flashcard | quiz
+            content         TEXT,              -- JSON snapshot, only needed for quiz (frozen at star-time)
+            created_at      TEXT NOT NULL,
+            PRIMARY KEY (session_id, lesson_id, item_id)
+        );
+
     """)
     conn.commit()
 
     # migration: add user_id if the table predates it
-    for table in ("lesson_progress", "lessons", "quiz_attempts"):
+    for table in ("lesson_progress", "lessons", "quiz_attempts", "saved_items"):
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if "user_id" not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)")
             conn.commit()
+
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(quiz_attempts)").fetchall()}
+    if "question_id" not in cols:
+        conn.execute("ALTER TABLE quiz_attempts ADD COLUMN question_id TEXT REFERENCES quiz_questions(question_id)")
+        conn.commit()
+    if "explanation" not in cols:
+        conn.execute("ALTER TABLE quiz_attempts ADD COLUMN explanation TEXT")
+        conn.commit()
+    if "question_index" in cols:
+        # question_index predates question_id-based tracking and is now
+        # unused/dead weight — but it's still NOT NULL, so any insert that
+        # doesn't supply it (all current code) fails. SQLite 3.35+ supports
+        # DROP COLUMN directly.
+        conn.execute("ALTER TABLE quiz_attempts DROP COLUMN question_index")
+        conn.commit()
 
     conn.close()
 
@@ -104,6 +147,7 @@ def claim_session(session_id, user_id):
     conn.execute("UPDATE quiz_attempts SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
     conn.execute("UPDATE lesson_progress SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
     conn.execute("UPDATE lessons SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
+    conn.execute("UPDATE saved_items SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
     conn.commit()
     conn.close()
 
@@ -166,17 +210,71 @@ def delete_user(user_id):
     conn.close()
 
 
-def record_quiz_attempt(session_id, lesson_id, concept_id, question_index,
+def get_quiz_question(question_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM quiz_questions WHERE question_id = ?", (question_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_active_quiz_questions(lesson_id, concept_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM quiz_questions WHERE lesson_id = ? AND concept_id = ? AND active = 1 ORDER BY question_id",
+        (lesson_id, concept_id)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_max_batch(lesson_id, concept_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT MAX(generation_batch) AS max_batch FROM quiz_questions WHERE lesson_id = ? AND concept_id = ?",
+        (lesson_id, concept_id)
+    ).fetchone()
+    conn.close()
+    return row["max_batch"] if row["max_batch"] is not None else -1
+
+
+def insert_quiz_questions(lesson_id, concept_id, questions, generation_batch):
+    conn = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    for i, q in enumerate(questions):
+        question_id = f"{lesson_id}_{concept_id}_b{generation_batch}_q{i:03d}"
+        conn.execute(
+            """INSERT INTO quiz_questions
+               (question_id, concept_id, lesson_id, question_text, type, choices,
+                answer, explanation, generation_batch, active, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (question_id, concept_id, lesson_id, q["question"], q["type"],
+             json.dumps(q["choices"], ensure_ascii=False), q["answer"], q["explanation"],
+             generation_batch, now)
+        )
+    conn.commit()
+    conn.close()
+
+
+def deactivate_batch(lesson_id, concept_id, generation_batch):
+    conn = get_db()
+    conn.execute(
+        "UPDATE quiz_questions SET active = 0 WHERE lesson_id = ? AND concept_id = ? AND generation_batch = ?",
+        (lesson_id, concept_id, generation_batch)
+    )
+    conn.commit()
+    conn.close()
+
+def record_quiz_attempt(session_id, lesson_id, concept_id, question_id,
                          question_text, answer_given, correct_answer, is_correct,
-                         user_id=None, submitted_at=None):
+                         user_id=None, submitted_at=None, explanation=None):
     conn = get_db()
     conn.execute(
         """INSERT INTO quiz_attempts
-           (session_id, user_id, lesson_id, concept_id, question_index, question_text,
-            answer_given, correct_answer, is_correct, submitted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (session_id, user_id, lesson_id, concept_id, question_index, question_text,
-         answer_given, correct_answer, int(is_correct),
+           (session_id, user_id, lesson_id, concept_id, question_id, question_text,
+            answer_given, correct_answer, explanation, is_correct, submitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (session_id, user_id, lesson_id, concept_id, question_id, question_text,
+         answer_given, correct_answer, explanation, int(is_correct),
          submitted_at or datetime.now(timezone.utc).isoformat())
     )
     conn.commit()
@@ -201,6 +299,49 @@ def get_quiz_history(user_id=None, session_id=None, lesson_id=None, concept_id=N
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def save_item(session_id, lesson_id, item_id, item_type, user_id=None, content=None):
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO saved_items (session_id, user_id, lesson_id, item_id, item_type, content, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(session_id, lesson_id, item_id) DO NOTHING""",
+        (session_id, user_id, lesson_id, item_id, item_type,
+         json.dumps(content, ensure_ascii=False) if content is not None else None,
+         datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def unsave_item(session_id, lesson_id, item_id):
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM saved_items WHERE session_id = ? AND lesson_id = ? AND item_id = ?",
+        (session_id, lesson_id, item_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_saved_items(session_id, lesson_id, user_id=None):
+    conn = get_db()
+    if user_id:
+        rows = conn.execute(
+            "SELECT * FROM saved_items WHERE user_id = ? AND lesson_id = ?", (user_id, lesson_id)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM saved_items WHERE session_id = ? AND user_id IS NULL AND lesson_id = ?",
+            (session_id, lesson_id)
+        ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["content"] = json.loads(d["content"]) if d["content"] else None
+        out.append(d)
+    return out
 
 # Single atomic upsert instead of SELECT-then-branch — avoids a race where
 # two near-simultaneous requests for the same session/lesson interleave

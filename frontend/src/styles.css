@@ -720,7 +720,7 @@ html, body {
 }
 
 /* ── Home button (both topbars) ─────────────────────────────────────────────── */
-#btn-home, #btn-home-study, #btn-home-progress,
+#btn-home, #btn-home-study, #btn-home-progress, #btn-home-attempt-detail,
 #btn-home-lessons, #btn-home-account, #btn-home-auth {
   background: none;
   border: none;
@@ -733,7 +733,7 @@ html, body {
   transition: color 200ms;
 }
 
-#btn-home:hover, #btn-home-study:hover, #btn-home-progress:hover,
+#btn-home:hover, #btn-home-study:hover, #btn-home-progress:hover, #btn-home-attempt-detail:hover,
 #btn-home-lessons:hover, #btn-home-account:hover, #btn-home-auth:hover {
   color: var(--accent);
 }
@@ -2240,7 +2240,7 @@ html, body {
   color: var(--accent);
 }
 
-#btn-back-progress, #btn-back-lessons, #btn-back-account {
+#btn-back-progress, #btn-back-lessons, #btn-back-account, #btn-back-attempt-detail{
   background: transparent;
   border: 1px solid var(--border);
   color: var(--surface);
@@ -2254,7 +2254,7 @@ html, body {
   transition: border-color 200ms, color 200ms;
 }
 
-#btn-back-progress:hover, #btn-back-lessons:hover, #btn-back-account:hover {
+#btn-back-progress:hover, #btn-back-lessons:hover, #btn-back-account:hover, #btn-back-attempt-detail:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
@@ -2990,7 +2990,8 @@ html, body {
 
 .results-wrong .results-question    { color: #e07070; }
 .results-wrong .results-icon        { color: #e07070; }
-.results-your-answer                { color: #e07070; font-size: 0.8rem; margin-top: 2px; }
+.results-your-answer-wrong          { color: #e07070; font-size: 0.8rem; margin-top: 2px; }
+.results-your-answer-correct        { color: #6fbf9a; font-size: 0.8rem; margin-top: 2px; }
 .results-your-answer-neutral        { color: var(--text-muted); }
 .results-correct-answer             { color: #6fbf9a; font-size: 0.8rem; margin-top: 2px; }
 
@@ -3092,7 +3093,7 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 
-#progress-course-name {
+#progress-course-name, #attempt-detail-heading {
   flex: 1;
 }
 
@@ -3197,6 +3198,33 @@ html, body {
   font-size: 10px;
   color: var(--text-muted);
   padding: 3px 0 3px 12px;
+  cursor: pointer;
+  transition: color 150ms;
+}
+
+.progress-history-row:hover {
+  color: var(--accent);
+}
+
+/* ── Attempt detail screen ─────────────────────────────────────────────────── */
+#attempt-detail-screen {
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+#attempt-detail-topbar {
+  display: flex;
+  align-items: center;
+  padding: 6px 28px;
+  gap: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+#attempt-detail-content {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 48px 24px;
 }
 
 
