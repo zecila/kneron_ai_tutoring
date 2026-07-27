@@ -3194,6 +3194,9 @@ html, body {
 }
 
 .progress-history-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
   font-family: var(--font-mono);
   font-size: 10px;
   color: var(--text-muted);
@@ -3202,8 +3205,15 @@ html, body {
   transition: color 150ms;
 }
 
-.progress-history-row:hover {
+.progress-history-row:hover,
+.progress-history-row:hover .progress-history-timestamp {
   color: var(--accent);
+}
+
+.progress-history-timestamp {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 /* ── Attempt detail screen ─────────────────────────────────────────────────── */

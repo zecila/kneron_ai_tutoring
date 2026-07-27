@@ -753,7 +753,13 @@ function renderConceptProgress(concept) {
   const best = runList.reduce((b, r) => (r.correct / r.total > b.correct / b.total ? r : b), runList[0]);
 
   const fmt = r => `${r.correct}/${r.total} (${Math.round((r.correct / r.total) * 100)}%)`;
-
+  const fmtSubmittedAt = iso => {
+    const d = new Date(iso);
+    const datePart = d.toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
+    const timePart = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).toLowerCase();
+    return `${datePart} ${timePart}`;
+  };
+  
   const html = `
     <div class="progress-concept-row">
       <div class="progress-concept-name">${concept.name}</div>
@@ -761,7 +767,7 @@ function renderConceptProgress(concept) {
       ${runList.length > 1 ? `
         <details class="progress-history-dropdown">
           <summary>View all ${runList.length} attempts</summary>
-          ${runList.map((r, i) => `<div class="progress-history-row" data-concept-id="${concept.conceptId}" data-idx="${i}">Attempt ${i + 1}: ${fmt(r)}</div>`).join("")}
+          ${runList.map((r, i) => `<div class="progress-history-row" data-concept-id="${concept.conceptId}" data-idx="${i}"><span>Attempt ${i + 1}: ${fmt(r)}</span><span class="progress-history-timestamp">Submitted at ${fmtSubmittedAt(r.at)}</span></div>`).join("")}
         </details>` : ""}
     </div>`;
 
