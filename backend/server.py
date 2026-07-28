@@ -32,6 +32,9 @@ from db import (
     get_max_batch, deactivate_batch, get_active_quiz_questions, 
     save_item, unsave_item, get_saved_items, update_user_name,
     create_password_reset, get_valid_reset, consume_reset_token, 
+    create_class, archive_class, get_classes_for_teacher, generate_join_code,
+    get_valid_join_code_for_class, resolve_join_code, join_class, leave_class,
+    get_enrollments_for_class
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -385,6 +388,94 @@ def _call_tool(system: str, user: str, tool: dict, max_retries: int = 2) -> dict
     raise last_err
 
 # ── Data routes ───────────────────────────────────────────────────────────────
+def require_teacher_owns_class(class_id, teacher_id):
+    """Returns the class row if it exists and belongs to this teacher, else None."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM classes WHERE id = ? AND teacher_id = ?", (class_id, teacher_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+@app.route("/api/classes", methods=["GET"])
+def list_classes():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    return jsonify({"classes": get_classes_for_teacher(user_id)})
+
+
+@app.route("/api/classes", methods=["POST"])
+def create_class_route():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Class name required"}), 400
+    if len(get_classes_for_teacher(user_id)) >= 10:
+        return jsonify({"error": "Class limit reached (10 max)"}), 400
+    class_id = create_class(user_id, name)
+    return jsonify({"ok": True, "class_id": class_id}), 201
+
+
+@app.route("/api/classes/<int:class_id>/archive", methods=["POST"])
+def archive_class_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    archive_class(class_id, user_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>/invite-code", methods=["POST"])
+def generate_invite_code_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    code = generate_join_code(class_id)
+    return jsonify({"ok": True, "code": code})
+
+
+@app.route("/api/classes/<int:class_id>/roster", methods=["GET"])
+def class_roster(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    return jsonify({"students": get_enrollments_for_class(class_id)})
+
+
+@app.route("/api/classes/join", methods=["POST"])
+def join_class_route():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    body = request.get_json(force=True)
+    code = (body.get("code") or "").strip().upper()
+    if not code:
+        return jsonify({"error": "Invite code required"}), 400
+    resolved = resolve_join_code(code)
+    if not resolved:
+        return jsonify({"error": "Invalid or expired invite code"}), 400
+    joined = join_class(resolved["class_id"], user_id)
+    if not joined:
+        return jsonify({"ok": True, "already_joined": True})
+    return jsonify({"ok": True, "already_joined": False})
+
+
+@app.route("/api/classes/<int:class_id>/leave", methods=["POST"])
+def leave_class_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    leave_class(class_id, user_id)
+    return jsonify({"ok": True})
 
 @app.route("/api/lessons/<lesson_id>/slideshow")
 def get_slideshow(lesson_id):

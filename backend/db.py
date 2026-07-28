@@ -2,6 +2,7 @@ import os
 import json
 import sqlite3
 import secrets
+import string
 from datetime import datetime, timezone, timedelta
 
 from lesson_paths import BACKEND_DIR
@@ -36,6 +37,29 @@ def init_db():
             expires_at TEXT NOT NULL,
             used       INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS classes (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            teacher_id      INTEGER NOT NULL REFERENCES users(id),
+            name            TEXT NOT NULL,
+            archived        INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS enrollments (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_id        INTEGER NOT NULL REFERENCES classes(id),
+            student_id      INTEGER NOT NULL REFERENCES users(id),
+            joined_at       TEXT NOT NULL,
+            UNIQUE (class_id, student_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS join_codes (
+            code            TEXT PRIMARY KEY,
+            class_id        INTEGER NOT NULL REFERENCES classes(id),
+            expires_at      TEXT NOT NULL,
+            created_at      TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS lessons (
@@ -214,6 +238,121 @@ def claim_session(session_id, user_id):
     conn.execute("UPDATE saved_items SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
     conn.commit()
     conn.close()
+
+
+
+def create_class(teacher_id, name):
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO classes (teacher_id, name, archived, created_at) VALUES (?, ?, 0, ?)",
+        (teacher_id, name, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    class_id = cur.lastrowid
+    conn.close()
+    return class_id
+
+
+def archive_class(class_id, teacher_id):
+    conn = get_db()
+    conn.execute(
+        "UPDATE classes SET archived = 1 WHERE id = ? AND teacher_id = ?",
+        (class_id, teacher_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_classes_for_teacher(teacher_id, include_archived=False):
+    conn = get_db()
+    query = "SELECT * FROM classes WHERE teacher_id = ?"
+    if not include_archived:
+        query += " AND archived = 0"
+    rows = conn.execute(query, (teacher_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def generate_join_code(class_id, ttl_minutes=30, length=6):
+    conn = get_db()
+    alphabet = string.ascii_uppercase + string.digits
+    code = "".join(secrets.choice(alphabet) for _ in range(length))
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO join_codes (code, class_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        (code, class_id, (now + timedelta(minutes=ttl_minutes)).isoformat(), now.isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return code
+
+
+def get_valid_join_code_for_class(class_id):
+    """Returns the row for the latest code, only if it's still unexpired."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM join_codes WHERE class_id = ? ORDER BY created_at DESC LIMIT 1",
+        (class_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+        return None
+    return row
+
+
+def resolve_join_code(code):
+    """Looks up a code and confirms it's the class's current (latest) code, not just any past one."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM join_codes WHERE code = ?", (code,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+        return None
+    latest = get_valid_join_code_for_class(row["class_id"])
+    if not latest or latest["code"] != code:
+        return None  # a newer code has since been generated
+    return dict(row)
+
+
+def join_class(class_id, student_id):
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO enrollments (class_id, student_id, joined_at) VALUES (?, ?, ?)
+           ON CONFLICT(class_id, student_id) DO NOTHING""",
+        (class_id, student_id, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    changed = conn.total_changes
+    conn.close()
+    return changed > 0  # False means already enrolled — caller can surface "already joined"
+
+
+def leave_class(class_id, student_id):
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM enrollments WHERE class_id = ? AND student_id = ?",
+        (class_id, student_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_enrollments_for_class(class_id):
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT u.id, u.email, u.first_name, u.last_name, e.joined_at
+           FROM enrollments e JOIN users u ON u.id = e.student_id
+           WHERE e.class_id = ?""",
+        (class_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
 
 def create_lesson_owner(lesson_id, session_id, user_id=None):
     conn = get_db()
