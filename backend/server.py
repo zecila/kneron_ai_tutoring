@@ -27,10 +27,11 @@ from db import (
     init_db, record_quiz_attempt, get_quiz_history, update_lesson_progress, 
     get_lesson_progress, create_user, get_user_by_email, claim_session, 
     create_lesson_owner, get_lessons_for_owner, owns_lesson, get_db,
-    get_user_by_email, update_user_password, owns_lesson, get_db, delete_lesson,
+    update_user_password, owns_lesson, get_db, delete_lesson,
     delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
     get_max_batch, deactivate_batch, get_active_quiz_questions, 
-    save_item, unsave_item, get_saved_items, update_user_name
+    save_item, unsave_item, get_saved_items, update_user_name,
+    create_password_reset, get_valid_reset, consume_reset_token, 
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -126,7 +127,7 @@ def signup():
 
 
 @app.route("/api/auth/login", methods=["POST"])
-@limiter.limit("10 per hour", key_func=get_remote_address)
+@limiter.limit("50 per hour", key_func=get_remote_address)
 def login():
     body = request.get_json(force=True)
     user = get_user_by_email(body.get("email", "").strip().lower())
@@ -143,6 +144,7 @@ def logout():
     session.pop("user_id", None)
     return jsonify({"ok": True})
 
+# logged in user with known password
 @app.route("/api/auth/change-password", methods=["POST"])
 def change_password():
     user_id, _ = current_identity()
@@ -162,6 +164,41 @@ def change_password():
         return jsonify({"error": "Current password is incorrect"}), 400
 
     update_user_password(user_id, generate_password_hash(new_password))
+    return jsonify({"ok": True})
+
+@app.route("/api/auth/forgot-password", methods=["POST"])
+@limiter.limit("100 per hour", key_func=get_remote_address)
+def forgot_password():
+    body = request.get_json(force=True)
+    email = (body.get("email") or "").strip().lower()
+    user = get_user_by_email(email) if email else None
+    if user:
+        token = create_password_reset(user["id"])
+        reset_link = f"http://localhost:5000/?token={token}"
+        print(f"[DEV] Password reset link for {email}: {reset_link}", flush=True)
+    # Always return the same response, whether or not the email exists —
+    # this avoids letting the endpoint be used to check which emails are registered.
+    return jsonify({"ok": True, "message": "If that email is registered, a reset link has been sent."})
+
+# user locked out with forgotten password
+@app.route("/api/auth/reset-password", methods=["POST"])
+def reset_password():
+    body = request.get_json(force=True)
+    token = body.get("token", "")
+    new_password = body.get("password", "")
+    if not token or len(new_password) < 6:
+        return jsonify({"error": "Invalid token or password too short"}), 400
+
+    reset = get_valid_reset(token)
+    if not reset:
+        return jsonify({"error": "This reset link is invalid or has expired"}), 400
+
+    conn = get_db()
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?",
+                 (generate_password_hash(new_password), reset["user_id"]))
+    conn.commit()
+    conn.close()
+    consume_reset_token(token)
     return jsonify({"ok": True})
 
 @app.route("/api/auth/me")

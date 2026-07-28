@@ -572,6 +572,42 @@ html, body {
 
 #auth-toggle-mode:hover { color: var(--accent); }
 
+#auth-forgot-link {
+  margin-top: 6px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: color 200ms;
+}
+
+#auth-forgot-link:hover { color: var(--accent); }
+
+.auth-success {
+  color: var(--accent);
+  font-size: 0.8rem;
+  min-height: 0;
+}
+
+#auth-reset-fields input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+}
+
+#auth-reset-fields input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .auth-error {
   color: var(--red);
   font-size: 0.8rem;

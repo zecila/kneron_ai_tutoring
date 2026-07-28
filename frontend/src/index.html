@@ -297,19 +297,31 @@
               <input type="text" id="auth-last-name" placeholder="Doe" />
             </div>
           </div>
+          <div id="auth-email-field">
+            <label class="auth-label" for="auth-email">Email</label>
+            <input type="email" id="auth-email" placeholder="you@example.com" required />
+          </div>
 
-          <label class="auth-label" for="auth-email">Email</label>
-          <input type="email" id="auth-email" placeholder="you@example.com" required />
-
-          <label class="auth-label" for="auth-password">Password</label>
-          <div class="auth-password-wrap">
+          <label class="auth-label" for="auth-password" id="auth-password-label">Password</label>
+          <div class="auth-password-wrap" id="auth-password-wrap">
             <input type="password" id="auth-password" placeholder="••••••••" required />
             <button type="button" id="auth-password-toggle" class="auth-password-toggle-btn" aria-label="Show password">👁</button>
           </div>
 
           <p id="auth-error" class="auth-error"></p>
+          <p id="auth-success" class="auth-success hidden"></p>
+
+          <div id="auth-reset-fields" class="hidden">
+            <label class="auth-label" for="auth-new-password" id="auth-new-password-label">Password</label>
+            <div class="auth-password-wrap" id="auth-new-password-wrap">
+              <input type="password" id="auth-new-password" placeholder="••••••••" />
+              <button type="button" id="auth-new-password-toggle" class="auth-password-toggle-btn" aria-label="Show password">👁</button>
+            </div>
+          </div>
+
           <button type="submit" id="auth-submit">Log in</button>
           <button type="button" id="auth-toggle-mode">Need an account? Sign up</button>
+          <button type="button" id="auth-forgot-link">Forgot password?</button>
         </form>
       </div>
     </main>
