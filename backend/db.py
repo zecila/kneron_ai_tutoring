@@ -110,6 +110,18 @@ def init_db():
         conn.execute("ALTER TABLE quiz_attempts DROP COLUMN question_index")
         conn.commit()
 
+    # add first_name/last_name/role if the table predates it
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "first_name" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN first_name TEXT")
+        conn.commit()
+    if "last_name" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN last_name TEXT")
+        conn.commit()
+    if "role" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'student' CHECK (role IN ('student','teacher'))")
+        conn.commit()
+
     conn.close()
 
 
