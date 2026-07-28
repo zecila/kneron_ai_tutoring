@@ -30,7 +30,7 @@ from db import (
     get_user_by_email, update_user_password, owns_lesson, get_db, delete_lesson,
     delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
     get_max_batch, deactivate_batch, get_active_quiz_questions, 
-    save_item, unsave_item, get_saved_items
+    save_item, unsave_item, get_saved_items, update_user_name
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -105,20 +105,24 @@ def current_identity():
 def signup():
     body = request.get_json(force=True)
     email, password = body.get("email", "").strip().lower(), body.get("password", "")
+    role = body.get("role", "student")
+    first_name = (body.get("first_name") or "").strip()
+    last_name = (body.get("last_name") or "").strip()
     if not email or not password:
         return jsonify({"error": "Email and password required"}), 400
     if "@" not in email or len(password) < 6:
         return jsonify({"error": "Invalid email or password too short"}), 400
+    if role not in ("student", "teacher"):
+        return jsonify({"error": "Invalid role"}), 400
+    if not first_name or not last_name:
+        return jsonify({"error": "First and last name required"}), 400
     if get_user_by_email(email):
         return jsonify({"error": "Account already exists"}), 409
 
-    user_id = create_user(email, generate_password_hash(password))
-    # Claim happens before user_id is written to the session cookie — the
-    # anonymous session_id is still the only key we have for "this person's
-    # existing data" at this exact moment.
+    user_id = create_user(email, generate_password_hash(password), role, first_name, last_name)
     claim_session(session["session_id"], user_id)
     session["user_id"] = user_id
-    return jsonify({"ok": True, "email": email}), 201
+    return jsonify({"ok": True, "email": email, "role": role}), 201
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -166,9 +170,26 @@ def whoami():
     if not user_id:
         return jsonify({"logged_in": False})
     conn = get_db()
-    row = conn.execute("SELECT email, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+    row = conn.execute("SELECT email, role, first_name, last_name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
-    return jsonify({"logged_in": True, "email": row["email"], "member_since": row["created_at"]})
+    return jsonify({
+        "logged_in": True, "email": row["email"], "role": row["role"],
+        "first_name": row["first_name"], "last_name": row["last_name"],
+        "member_since": row["created_at"]
+    })
+
+@app.route("/api/auth/update-name", methods=["POST"])
+def update_name():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    body = request.get_json(force=True)
+    first_name = (body.get("first_name") or "").strip() or None
+    last_name = (body.get("last_name") or "").strip() or None
+    if not first_name or not last_name:
+        return jsonify({"error": "First and last name required"}), 400
+    update_user_name(user_id, first_name, last_name)
+    return jsonify({"ok": True, "first_name": first_name, "last_name": last_name})
 
 @app.before_request
 def ensure_session_id():
