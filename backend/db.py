@@ -125,16 +125,23 @@ def init_db():
     conn.close()
 
 
-def create_user(email, password_hash):
+def create_user(email, password_hash, role="student", first_name=None, last_name=None):
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-        (email, password_hash, datetime.now(timezone.utc).isoformat())
+        "INSERT INTO users (email, password_hash, role, first_name, last_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (email, password_hash, role, first_name, last_name, datetime.now(timezone.utc).isoformat())
     )
     conn.commit()
     user_id = cur.lastrowid
     conn.close()
     return user_id
+
+
+def update_user_name(user_id, first_name, last_name):
+    conn = get_db()
+    conn.execute("UPDATE users SET first_name = ?, last_name = ? WHERE id = ?", (first_name, last_name, user_id))
+    conn.commit()
+    conn.close()
 
 
 def get_user_by_email(email):

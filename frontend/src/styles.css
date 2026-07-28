@@ -397,7 +397,7 @@ html, body {
 }
 
 
-/* ── Account Options ────────────────────────────────────────────────────────── */
+/* ── Account Auth ────────────────────────────────────────────────────────── */
 
 .auth-control {
   position: relative;
@@ -576,6 +576,167 @@ html, body {
   color: var(--red);
   font-size: 0.8rem;
   min-height: 0;
+}
+
+/* ── Role toggle + name fields (signup) ──────────────────────────────────── */
+.auth-role-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.auth-role-btn {
+  flex: 1;
+  padding: 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: border-color 200ms, color 200ms, background 200ms;
+}
+
+.auth-role-btn:hover {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.auth-role-btn.role-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--stage_bg);
+}
+
+.auth-name-fields {
+  display: flex;
+  gap: 10px;
+}
+
+.auth-name-fields > div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.auth-name-fields input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+}
+
+.auth-name-fields input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ── Account: role + name editing ────────────────────────────────────────── */
+.account-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-top: 6px;
+}
+
+#account-name-view {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.account-name {
+  font-family: var(--font-body);
+  font-size: 1.15rem;
+  color: var(--surface);
+}
+
+.account-edit-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 200ms;
+}
+
+.account-edit-link:hover {
+  color: var(--accent);
+}
+
+#edit-name-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.edit-name-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.edit-name-actions .card-btn {
+  flex: 1;
+  margin-top: 0;
+}
+
+.card-btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+#edit-name-form input {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+}
+
+#edit-name-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#change-pw-form input {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+}
+
+#change-pw-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#change-pw-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  margin-top: 12px;
 }
 
 /* ── Error screen ───────────────────────────────────────────────────────────── */
@@ -2359,7 +2520,7 @@ html, body {
 
 .account-email {
   font-family: var(--font-body);
-  font-size: 1.1rem;
+  font-size: 0.9rem;
   color: var(--surface);
 }
 
@@ -2367,7 +2528,38 @@ html, body {
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-muted);
+  margin-top: 2px;
+  margin-bottom: 0;
+}
+
+.account-divider {
+  width: 100%;
+  height: 1px;
+  background: var(--border);
+  margin: 36px 0 32px;
+}
+
+.account-detail-row {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
   margin-bottom: 20px;
+}
+
+.account-detail-row .account-label {
+  margin-top: 0;
+}
+
+.account-actions-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.account-actions-row .card-btn {
+  flex: 1;
+  margin-top: 0;
 }
 
 .account-card .card-btn {
@@ -2375,7 +2567,7 @@ html, body {
 }
 
 #account-delete-btn {
-  margin-top: 60px;
+  margin-top: 36px;
 }
 
 #account-delete-btn:hover {

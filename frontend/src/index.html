@@ -282,6 +282,22 @@
         <h1 class="auth-title" id="auth-title">Welcome back</h1>
         <p class="auth-subtitle" id="auth-subtitle">Log in to continue</p>
         <form id="auth-form">
+          <div id="auth-role-toggle" class="auth-role-toggle hidden">
+            <button type="button" class="auth-role-btn" data-role="student">Student</button>
+            <button type="button" class="auth-role-btn" data-role="teacher">Teacher</button>
+          </div>
+
+          <div id="auth-name-fields" class="auth-name-fields hidden">
+            <div>
+              <label class="auth-label" for="auth-first-name">First name</label>
+              <input type="text" id="auth-first-name" placeholder="Jane" />
+            </div>
+            <div>
+              <label class="auth-label" for="auth-last-name">Last name</label>
+              <input type="text" id="auth-last-name" placeholder="Doe" />
+            </div>
+          </div>
+
           <label class="auth-label" for="auth-email">Email</label>
           <input type="email" id="auth-email" placeholder="you@example.com" required />
 

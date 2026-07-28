@@ -15,6 +15,7 @@ let slideAnimating = false;
 
 // auth
 let authMode = "login";
+let selectedRole = "student";
 
 // info card
 let infoPanelOpen = false;
@@ -115,8 +116,20 @@ function initAuthForm() {
   const form = document.getElementById("auth-form");
   const toggle = document.getElementById("auth-toggle-mode");
   const errorEl = document.getElementById("auth-error");
+  const roleToggle = document.getElementById("auth-role-toggle");
+  const nameFields = document.getElementById("auth-name-fields");
 
   document.getElementById("auth-title").textContent = authMode === "login" ? "Welcome back" : "Create an account";
+  roleToggle.classList.toggle("hidden", authMode !== "signup");
+  nameFields.classList.toggle("hidden", authMode !== "signup");
+
+  roleToggle.querySelectorAll(".auth-role-btn").forEach(btn => {
+    btn.classList.toggle("role-active", btn.dataset.role === selectedRole);
+    btn.onclick = () => {
+      selectedRole = btn.dataset.role;
+      roleToggle.querySelectorAll(".auth-role-btn").forEach(b => b.classList.toggle("role-active", b.dataset.role === selectedRole));
+    };
+  });
 
   initPasswordToggle(document.getElementById("auth-password-toggle"), document.getElementById("auth-password"));
 
@@ -126,6 +139,8 @@ function initAuthForm() {
     document.getElementById("auth-title").textContent = authMode === "login" ? "Welcome back" : "Create an account";
     document.getElementById("auth-subtitle").textContent = authMode === "login" ? "Log in to continue" : "Sign up to get started";
     toggle.textContent = authMode === "login" ? "Need an account? Sign up" : "Have an account? Log in";
+    roleToggle.classList.toggle("hidden", authMode !== "signup");
+    nameFields.classList.toggle("hidden", authMode !== "signup");
     errorEl.textContent = "";
     form.reset();
     resetPasswordVisibility(document.getElementById("auth-password"), document.getElementById("auth-password-toggle"));
@@ -136,12 +151,18 @@ function initAuthForm() {
     errorEl.textContent = "";
     const email = document.getElementById("auth-email").value.trim();
     const password = document.getElementById("auth-password").value;
+    const body = { email, password };
+    if (authMode === "signup") {
+      body.role = selectedRole;
+      body.first_name = document.getElementById("auth-first-name").value.trim();
+      body.last_name = document.getElementById("auth-last-name").value.trim();
+    }
 
     try {
       const res = await fetch(`/api/auth/${authMode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify(body)
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong");
@@ -170,12 +191,35 @@ async function loadAccountPage() {
     el.innerHTML = `
       <div class="account-card">
         <div class="account-avatar"></div>
-        <p class="account-label">Email</p>
-        <p class="account-email"></p>
+
+        <div id="account-name-view">
+          <span class="account-name"></span>
+          <button id="account-edit-name-btn" class="account-edit-link">Edit</button>
+        </div>
+        <form id="edit-name-form" class="hidden">
+          <input type="text" id="edit-first-name" placeholder="First name" />
+          <input type="text" id="edit-last-name" placeholder="Last name" />
+          <p id="edit-name-error" class="auth-error"></p>
+          <div class="edit-name-actions">
+            <button type="submit" class="card-btn">Save</button>
+            <button type="button" id="cancel-edit-name-btn" class="card-btn card-btn-ghost">Cancel</button>
+          </div>
+        </form>
+
+        <p class="account-role"></p>
         <p class="account-since">Member since ${joined}</p>
-        <div class="account-stats"> ... </div>
-        <button id="account-logout-btn" class="card-btn">Log out</button>
-        <button id="account-change-pw-btn" class="card-btn">Change password</button>
+
+        <div class="account-divider"></div>
+
+        <div class="account-detail-row">
+          <span class="account-label">Email</span>
+          <span class="account-email"></span>
+        </div>
+
+        <div class="account-actions-row">
+          <button id="account-logout-btn" class="card-btn">Log out</button>
+          <button id="account-change-pw-btn" class="card-btn">Change password</button>
+        </div>
         <form id="change-pw-form" class="hidden">
           <div class="auth-password-wrap">
             <input type="password" id="current-password" placeholder="Current password" required />
@@ -192,6 +236,43 @@ async function loadAccountPage() {
       </div>`;
     el.querySelector(".account-avatar").textContent = data.email.charAt(0).toUpperCase();
     el.querySelector(".account-email").textContent = data.email;
+    el.querySelector(".account-role").textContent = data.role === "teacher" ? "Teacher" : "Student";
+    el.querySelector(".account-name").textContent = `${data.first_name || ""} ${data.last_name || ""}`.trim() || "No name set";
+
+    const nameView = document.getElementById("account-name-view");
+    const nameForm = document.getElementById("edit-name-form");
+    const firstInput = document.getElementById("edit-first-name");
+    const lastInput = document.getElementById("edit-last-name");
+    const nameErrorEl = document.getElementById("edit-name-error");
+
+    document.getElementById("account-edit-name-btn").onclick = () => {
+      firstInput.value = data.first_name || "";
+      lastInput.value = data.last_name || "";
+      nameErrorEl.textContent = "";
+      nameView.classList.add("hidden");
+      nameForm.classList.remove("hidden");
+    };
+    document.getElementById("cancel-edit-name-btn").onclick = () => {
+      nameForm.classList.add("hidden");
+      nameView.classList.remove("hidden");
+    };
+    nameForm.onsubmit = async (e) => {
+      e.preventDefault();
+      nameErrorEl.textContent = "";
+      try {
+        const res = await fetch("/api/auth/update-name", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ first_name: firstInput.value.trim(), last_name: lastInput.value.trim() })
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "Could not update name");
+        loadAccountPage(); // refresh
+      } catch (err) {
+        nameErrorEl.textContent = err.message;
+      }
+    };
+
     document.getElementById("account-logout-btn").onclick = logout;
     document.getElementById("account-delete-btn").onclick = confirmDeleteAccount;
     document.getElementById("account-change-pw-btn").onclick = () => {
@@ -267,6 +348,11 @@ function enterLesson(id) {
     .then(() => {
       if (scene === "study") switchScene("study"); // use the captured value, not a fresh (now-empty) lookup
     })
+    .catch(err => {
+      document.getElementById("error-message").textContent = err.message;
+      document.querySelector(".error-code").textContent = err.message.match(/\d{3}/)?.[0] || "!";
+      showScreen("error");
+    });
 }
 
 async function loadSlideshow(justGenerated = false) {
