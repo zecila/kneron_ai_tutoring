@@ -14,7 +14,8 @@ let lastScene = "slideshow";
 let slideAnimating = false;
 
 // auth
-let authMode = "login";
+let authMode = "login";   // login, signup, forgot, reset
+let resetToken = null;
 let selectedRole = "student";
 
 // info card
@@ -61,7 +62,11 @@ function renderAuthButton() {
     el.appendChild(btn);
 
     if (!currentUser) {
-      btn.onclick = () => switchScene("auth");
+      btn.onclick = () => {
+        authMode = "login";
+        switchScene("auth");
+        applyAuthMode();
+      };
       return;
     }
 
@@ -112,16 +117,72 @@ function resetPasswordVisibility(inputEl, toggleEl) {
   toggleEl.innerHTML = eyeClosed;
 }
 
+function checkForResetToken() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  if (token) {
+    resetToken = token;
+    authMode = "reset";
+    history.replaceState(null, "", window.location.pathname); // scrub token from the visible URL
+    switchScene("auth"); // jump straight into the reset form
+  }
+}
+
+function applyAuthMode() {
+  const roleToggle = document.getElementById("auth-role-toggle");
+  const nameFields = document.getElementById("auth-name-fields");
+  const resetFields = document.getElementById("auth-reset-fields");
+  const emailField = document.getElementById("auth-email-field");
+  const passwordWrap = document.getElementById("auth-password-wrap");
+  const passwordLabel = document.getElementById("auth-password-label");
+  const newPasswordWrap = document.getElementById("auth-new-password-wrap");
+  const newPasswordLabel = document.getElementById("auth-new-password-label");
+  const toggleBtn = document.getElementById("auth-toggle-mode");
+  const forgotLink = document.getElementById("auth-forgot-link");
+  const submitBtn = document.getElementById("auth-submit");
+  const title = document.getElementById("auth-title");
+  const subtitle = document.getElementById("auth-subtitle");
+
+  roleToggle.classList.toggle("hidden", authMode !== "signup");
+  nameFields.classList.toggle("hidden", authMode !== "signup");
+  emailField.classList.toggle("hidden", authMode === "reset");
+  resetFields.classList.toggle("hidden", authMode !== "reset");
+  document.getElementById("auth-email").parentElement.classList.toggle("hidden", authMode === "reset");
+
+  passwordWrap.classList.toggle("hidden", authMode === "reset" || authMode === "forgot");
+  passwordLabel.classList.toggle("hidden", authMode === "reset" || authMode === "forgot");
+  document.getElementById("auth-password").required = authMode !== "reset" && authMode !== "forgot";
+
+  newPasswordWrap.classList.toggle("hidden", authMode !== "reset");
+  newPasswordLabel.classList.toggle("hidden", authMode !== "reset");
+  document.getElementById("auth-new-password").required = authMode === "reset";
+
+  toggleBtn.classList.toggle("hidden", authMode === "reset");
+  forgotLink.classList.toggle("hidden", authMode !== "login");
+
+  const titles = {
+    login: ["Welcome back", "Log in to continue"],
+    signup: ["Create an account", "Sign up to get started"],
+    forgot: ["Reset your password", "Enter your email and we'll send you a reset link"],
+    reset: ["Set a new password", "Choose a new password for your account"]
+  };
+  [title.textContent, subtitle.textContent] = titles[authMode];
+
+  const submitLabels = { login: "Log in", signup: "Sign up", forgot: "Send reset link", reset: "Save new password" };
+  submitBtn.textContent = submitLabels[authMode];
+
+  document.getElementById("auth-error").textContent = "";
+  document.getElementById("auth-success").classList.add("hidden");
+}
+
 function initAuthForm() {
   const form = document.getElementById("auth-form");
   const toggle = document.getElementById("auth-toggle-mode");
   const errorEl = document.getElementById("auth-error");
+  const successEl = document.getElementById("auth-success");
   const roleToggle = document.getElementById("auth-role-toggle");
-  const nameFields = document.getElementById("auth-name-fields");
 
-  document.getElementById("auth-title").textContent = authMode === "login" ? "Welcome back" : "Create an account";
-  roleToggle.classList.toggle("hidden", authMode !== "signup");
-  nameFields.classList.toggle("hidden", authMode !== "signup");
+  applyAuthMode();
 
   roleToggle.querySelectorAll(".auth-role-btn").forEach(btn => {
     btn.classList.toggle("role-active", btn.dataset.role === selectedRole);
@@ -132,23 +193,64 @@ function initAuthForm() {
   });
 
   initPasswordToggle(document.getElementById("auth-password-toggle"), document.getElementById("auth-password"));
+  initPasswordToggle(document.getElementById("auth-new-password-toggle"), document.getElementById("auth-new-password"));
 
   toggle.onclick = () => {
     authMode = authMode === "login" ? "signup" : "login";
-    document.getElementById("auth-submit").textContent = authMode === "login" ? "Log in" : "Sign up";
-    document.getElementById("auth-title").textContent = authMode === "login" ? "Welcome back" : "Create an account";
-    document.getElementById("auth-subtitle").textContent = authMode === "login" ? "Log in to continue" : "Sign up to get started";
     toggle.textContent = authMode === "login" ? "Need an account? Sign up" : "Have an account? Log in";
-    roleToggle.classList.toggle("hidden", authMode !== "signup");
-    nameFields.classList.toggle("hidden", authMode !== "signup");
-    errorEl.textContent = "";
+    applyAuthMode();
     form.reset();
     resetPasswordVisibility(document.getElementById("auth-password"), document.getElementById("auth-password-toggle"));
+  };
+
+  document.getElementById("auth-forgot-link").onclick = () => {
+    authMode = "forgot";
+    applyAuthMode();
+    form.reset();
   };
 
   form.onsubmit = async (e) => {
     e.preventDefault();
     errorEl.textContent = "";
+    successEl.classList.add("hidden");
+
+    if (authMode === "forgot") {
+      const email = document.getElementById("auth-email").value.trim();
+      try {
+        const res = await fetch("/api/auth/forgot-password", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email })
+        });
+        const result = await res.json();
+        successEl.textContent = result.message;
+        successEl.classList.remove("hidden");
+      } catch (err) {
+        errorEl.textContent = "Something went wrong. Try again.";
+      }
+      return;
+    }
+
+    if (authMode === "reset") {
+      const password = document.getElementById("auth-new-password").value;
+      try {
+        const res = await fetch("/api/auth/reset-password", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: resetToken, password })
+        });
+        const result = await res.json();
+        if (!res.ok) throw new Error(result.error || "Reset failed");
+        resetToken = null;
+        authMode = "login";
+        applyAuthMode();
+        toggle.textContent = "Need an account? Sign up";
+        successEl.textContent = "Password updated. You can log in now.";
+        successEl.classList.remove("hidden");
+      } catch (err) {
+        errorEl.textContent = err.message;
+      }
+      return;
+    }
+
     const email = document.getElementById("auth-email").value.trim();
     const password = document.getElementById("auth-password").value;
     const body = { email, password };
@@ -171,7 +273,7 @@ function initAuthForm() {
       renderAuthButton();
       form.reset();
       resetPasswordVisibility(document.getElementById("auth-password"), document.getElementById("auth-password-toggle"));
-      loadLessonLibrary(); // refresh library, claimed lessons may now show
+      loadLessonLibrary();
       switchScene(lastScene === "auth" ? "welcome" : lastScene);
     } catch (err) {
       errorEl.textContent = err.message;
@@ -335,6 +437,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", handleKeyboard);
   initUpload();
   checkAuth();
+  checkForResetToken();
   initAuthForm();
 });
 

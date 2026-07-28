@@ -1,7 +1,8 @@
 import os
 import json
 import sqlite3
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 
 from lesson_paths import BACKEND_DIR
 DB_PATH = os.path.join(BACKEND_DIR, "data", "app.db")
@@ -26,6 +27,15 @@ def init_db():
             email           TEXT NOT NULL UNIQUE,
             password_hash   TEXT NOT NULL,
             created_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL REFERENCES users(id),
+            token      TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            used       INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS lessons (
@@ -150,9 +160,44 @@ def get_user_by_email(email):
     conn.close()
     return dict(row) if row else None
 
+
 def update_user_password(user_id, password_hash):
     conn = get_db()
     conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+    conn.commit()
+    conn.close()
+
+
+def create_password_reset(user_id, ttl_minutes=30):
+    conn = get_db()
+    conn.execute("UPDATE password_resets SET used = 1 WHERE user_id = ? AND used = 0", (user_id,))
+    token = secrets.token_urlsafe(32)
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)).isoformat()
+    conn.execute(
+        "INSERT INTO password_resets (user_id, token, expires_at, used, created_at) VALUES (?, ?, ?, 0, ?)",
+        (user_id, token, expires_at, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def get_valid_reset(token):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM password_resets WHERE token = ? AND used = 0", (token,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+        return None
+    return row
+
+
+def consume_reset_token(token):
+    conn = get_db()
+    conn.execute("UPDATE password_resets SET used = 1 WHERE token = ?", (token,))
     conn.commit()
     conn.close()
 
