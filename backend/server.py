@@ -441,6 +441,17 @@ def generate_invite_code_route(class_id):
     return jsonify({"ok": True, "code": code})
 
 
+@app.route("/api/classes/<int:class_id>/invite-code", methods=["GET"])
+def get_current_invite_code(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    row = get_valid_join_code_for_class(class_id)
+    return jsonify({"code": row["code"] if row else None})
+
+
 @app.route("/api/classes/<int:class_id>/roster", methods=["GET"])
 def class_roster(class_id):
     user_id, _ = current_identity()

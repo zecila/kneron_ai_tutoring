@@ -821,6 +821,137 @@ html, body {
   color: var(--accent);
 }
 
+/* ── create class/assignment button ───────────────────────────────────────────────────────────── */
+
+.section-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 720px;
+}
+
+.btn-small {
+  background: var(--accent);
+  color: var(--surface);
+  border: none;
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 200ms;
+}
+
+.btn-small:hover {
+  opacity: 0.85;
+}
+
+#new-class-name {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+}
+
+#new-class-name:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#create-class-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#create-class-modal.hidden {
+  display: none !important;
+}
+
+#create-class-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#create-class-modal-dialog {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  z-index: 1;
+  min-width: 340px;
+}
+
+#create-class-modal-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  color: var(--surface);
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+#create-class-modal-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+#btn-cancel-class {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 200ms, color 200ms;
+}
+
+#btn-cancel-class:hover {
+  border-color: var(--surface);
+  color: var(--surface);
+}
+
+#btn-submit-class {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 200ms, border-color 200ms;
+}
+
+#btn-submit-class:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+}
+
+#classes-list-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* ── App layout ─────────────────────────────────────────────────────────────── */
 #slideshow {
   display: grid;
@@ -918,7 +1049,8 @@ html, body {
 
 /* ── Home button (both topbars) ─────────────────────────────────────────────── */
 #btn-home, #btn-home-study, #btn-home-progress, #btn-home-attempt-detail,
-#btn-home-lessons, #btn-home-account, #btn-home-auth {
+#btn-home-lessons, #btn-home-account, #btn-home-auth,
+#btn-home-classes, #btn-home-class-detail {
   background: none;
   border: none;
   padding: 0;
@@ -2399,7 +2531,7 @@ html, body {
    (login/signup etc.), so strip the button chrome and treat it as a label. */
 #btn-to-progress, #btn-to-progress-study, #btn-to-progress-lessons,
 #btn-to-lessons, #btn-to-lessons-welcome, #btn-to-lessons-study,
-#btn-to-lessons-progress {
+#btn-to-lessons-progress, #btn-to-classes-welcome {
   background: none;
   border: none;
   padding: 0;
@@ -2413,7 +2545,7 @@ html, body {
 
 #btn-to-progress:hover, #btn-to-progress-study:hover, #btn-to-progress-lessons:hover,
 #btn-to-lessons:hover, #btn-to-lessons-welcome:hover, #btn-to-lessons-study:hover,
-#btn-to-lessons-progress:hover {
+#btn-to-lessons-progress:hover, #btn-to-classes-welcome:hover {
   color: var(--accent);
 }
 
@@ -2437,7 +2569,8 @@ html, body {
   color: var(--accent);
 }
 
-#btn-back-progress, #btn-back-lessons, #btn-back-account, #btn-back-attempt-detail{
+#btn-back-progress, #btn-back-lessons, #btn-back-account, #btn-back-attempt-detail,
+#btn-back-classes, #btn-back-class-detail {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--surface);
@@ -2451,13 +2584,14 @@ html, body {
   transition: border-color 200ms, color 200ms;
 }
 
-#btn-back-progress:hover, #btn-back-lessons:hover, #btn-back-account:hover, #btn-back-attempt-detail:hover {
+#btn-back-progress:hover, #btn-back-lessons:hover, #btn-back-account:hover, #btn-back-attempt-detail:hover,
+#btn-back-classes:hover, #btn-back-class-detail:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
 
 /* ── My Lessons tab ───────────────────────────────────*/
-#lessons-screen, #account-screen, #auth-screen {
+#lessons-screen, #account-screen, #auth-screen, #classes-screen, #class-detail-screen {
   height: 100vh;
   overflow-y: auto;
   background: var(--bg);
@@ -2502,7 +2636,7 @@ html, body {
   margin-left: 0;
 }
 
-#lessons-content, #account-content, #auth-content {
+#lessons-content, #account-content, #auth-content, #classes-content, #class-detail-content {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -3313,7 +3447,8 @@ html, body {
   background: var(--bg);
 }
 
-#progress-topbar, #lessons-topbar, #account-topbar, #auth-topbar {
+#progress-topbar, #lessons-topbar, #account-topbar, #auth-topbar,
+#classes-topbar, #class-detail-topbar {
   display: flex;
   align-items: center;
   padding: 6px 28px;

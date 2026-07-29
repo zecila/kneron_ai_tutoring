@@ -46,11 +46,18 @@ async function checkAuth() {
   try {
     const res = await fetch("/api/auth/me");
     const data = await res.json();
-    currentUser = data.logged_in ? { email: data.email } : null;
+    currentUser = data.logged_in ? { email: data.email, role: data.role } : null;
   } catch {
     currentUser = null;
   }
   renderAuthButton();
+  applyRoleNav();
+}
+
+function applyRoleNav() {
+  const isTeacher = currentUser?.role === "teacher";
+  document.querySelectorAll(".nav-progress-btn, .nav-lessons-btn").forEach(el => el.classList.toggle("hidden", isTeacher));
+  document.querySelectorAll("#btn-to-classes-welcome").forEach(el => el.classList.toggle("hidden", !isTeacher));
 }
 
 function renderAuthButton() {
@@ -426,6 +433,81 @@ async function logout() {
   renderAuthButton();
   showWelcome();
 }
+
+// ─── Classes (teacher) ─────────────────────────────────────────────────────
+let activeClassId = null;
+
+async function loadClassesPage() {
+  const res = await fetch("/api/classes");
+  const data = await res.json();
+  const list = document.getElementById("classes-list-items");
+  list.innerHTML = "";
+  (data.classes || []).forEach(c => {
+    const row = document.createElement("div");
+    row.className = "lesson-library-item";
+    row.textContent = c.name;
+    row.onclick = () => openClassDetail(c.id, c.name);
+    list.appendChild(row);
+  });
+}
+
+document.getElementById("btn-create-class")?.addEventListener("click", () => {
+  document.getElementById("create-class-modal").classList.remove("hidden");
+});
+
+function hideCreateClassForm() {
+  document.getElementById("create-class-modal").classList.add("hidden");
+  document.getElementById("new-class-name").value = "";
+}
+
+document.getElementById("btn-submit-class")?.addEventListener("click", async () => {
+  const name = document.getElementById("new-class-name").value.trim();
+  if (!name) return;
+  await fetch("/api/classes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  hideCreateClassForm();
+  loadClassesPage();
+});
+
+async function openClassDetail(classId, className) {
+  activeClassId = classId;
+  document.getElementById("class-detail-name").textContent = className;
+  switchScene("class-detail");
+  loadClassDetail(classId);
+}
+
+async function loadClassDetail(classId) {
+  const codeRes = await fetch(`/api/classes/${classId}/invite-code`);  // GET, not POST. read-only  
+  // NOTE: temporary — calling invite-code on every page load regenerates it.
+  // Swap for a GET-current-code endpoint before shipping; see note below.
+  const codeData = await codeRes.json();
+  document.getElementById("class-invite-code").textContent = codeData.code || "No active code — click Regenerate";
+
+  const rosterRes = await fetch(`/api/classes/${classId}/roster`);
+  const rosterData = await rosterRes.json();
+  const rosterList = document.getElementById("roster-list");
+  rosterList.innerHTML = "";
+  (rosterData.students || []).forEach(s => {
+    const row = document.createElement("div");
+    row.className = "lesson-library-item";
+    row.textContent = `${s.first_name} ${s.last_name} — joined ${s.joined_at}`;
+    rosterList.appendChild(row);
+  });
+}
+
+document.getElementById("btn-regenerate-code")?.addEventListener("click", async () => {
+  const res = await fetch(`/api/classes/${activeClassId}/invite-code`, { method: "POST" });
+  const data = await res.json();
+  document.getElementById("class-invite-code").textContent = data.code || "";
+  document.getElementById("btn-regenerate-code").textContent = "Regenerate";  // switches label after first generation
+});
+
+document.getElementById("btn-create-assignment")?.addEventListener("click", () => {
+  alert("Assignment creation coming soon.");
+});
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
@@ -2560,6 +2642,8 @@ function switchScene(name) {
     if (currentAudio) { currentAudio.pause(); audioPaused = true; }
     if (autoPlayTimer) { clearTimeout(autoPlayTimer); autoPlayTimer = null; }
     ttsRequestId++;
+  } else if (name === "classes"){
+    if (currentAudio) { currentAudio.pause(); audioPaused = true; }
   } else {
     // Leaving the lesson context entirely (Account, Auth, etc.)
     // wipe narration instead of just pausing it
@@ -2572,6 +2656,8 @@ function switchScene(name) {
   document.getElementById("attempt-detail-screen").classList.toggle("hidden", name !== "attempt-detail");  
   document.getElementById("welcome-screen").classList.toggle("hidden", name !== "welcome");
   document.getElementById("auth-screen")?.classList.toggle("hidden", name !== "auth");
+  document.getElementById("classes-screen")?.classList.toggle("hidden", name !== "classes");
+  document.getElementById("class-detail-screen")?.classList.toggle("hidden", name !== "class-detail");
   document.getElementById("lessons-screen").classList.toggle("hidden", name !== "lessons");
   document.getElementById("account-screen").classList.toggle("hidden", name !== "account");
 
@@ -2584,13 +2670,11 @@ function switchScene(name) {
     }
   }
 
-  if (name === "lessons") {
-    loadLessonLibrary();
-  }
+  if (name === "classes") loadClassesPage();
 
-  if (name === "account") {
-    loadAccountPage();
-  }
+  if (name === "lessons") loadLessonLibrary();
+
+  if (name === "account") loadAccountPage();
 
   if (name === "study" && curriculum) {
     // build "All Concepts" as index 0, then real concepts

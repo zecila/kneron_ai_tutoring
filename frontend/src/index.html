@@ -20,8 +20,9 @@
     <!-- Welcome / Home screen -->
     <div id="welcome-screen">
       <div class="topnav-right">
-        <button id="btn-to-progress-welcome" onclick="switchScene('progress')">Progress</button>
-        <button id="btn-to-lessons-welcome" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-progress-welcome" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-welcome" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-classes-welcome" onclick="switchScene('classes')" class="hidden">Classes</button>
         <div id="auth-control-welcome" class="auth-control"></div>
       </div>
       <div class="welcome-inner">
@@ -65,6 +66,68 @@
       </div>
     </div>
 
+    <div id="classes-screen" class="hidden">
+    <header id="classes-topbar">
+      <button id="btn-home-classes" onclick="confirmHome()">Home</button>
+      <div class="topnav-right">
+        <div id="auth-control-classes" class="auth-control"></div>
+        <button id="btn-back-classes" onclick="showWelcome()">Back</button>
+      </div>
+    </header>
+    <main id="classes-content">
+      <div class="section-header-row">
+        <h1 class="lessons-page-heading">Classes</h1>
+        <button id="btn-create-class" class="btn-small">+ Create Class</button>
+      </div>
+      <div id="create-class-modal" class="hidden">
+        <div id="create-class-modal-backdrop" onclick="hideCreateClassForm()"></div>
+        <div id="create-class-modal-dialog">
+          <p id="create-class-modal-title">Create Class</p>
+          <label class="auth-label" for="new-class-name">Class name</label>
+          <input type="text" id="new-class-name">
+          <div id="create-class-modal-buttons">
+            <button id="btn-cancel-class" onclick="hideCreateClassForm()">Cancel</button>
+            <button id="btn-submit-class">Create</button>
+          </div>
+        </div>
+      </div>
+      <div id="classes-list" class="lesson-library-card">
+        <p class="lesson-library-heading">Your Classes</p>
+        <div id="classes-list-items"></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="class-detail-screen" class="hidden">
+    <header id="class-detail-topbar">
+      <button id="btn-home-class-detail" onclick="confirmHome()">Home</button>
+      <div id="class-detail-name"></div>
+      <div class="topnav-right">
+        <button id="btn-back-class-detail" onclick="switchScene('classes')">Back</button>
+      </div>
+    </header>
+    <main id="class-detail-content">
+      <div id="class-invite-row" class="lesson-library-card">
+        <div class="section-header-row">
+          <p class="lesson-library-heading">Invite Code</p>
+          <button id="btn-regenerate-code" class="btn-small">Generate</button>
+        </div>
+        <span id="class-invite-code"></span>
+      </div>
+      <div id="class-assignments" class="lesson-library-card">
+        <div class="section-header-row">
+          <p class="lesson-library-heading">Assignments</p>
+          <button id="btn-create-assignment" class="btn-small">+ Create Assignment</button>
+        </div>
+        <div id="assignments-list"></div>
+      </div>
+      <div id="class-roster" class="lesson-library-card">
+        <p class="lesson-library-heading">Roster</p>
+        <div id="roster-list"></div>
+      </div>
+    </main>
+  </div>
+
     <!-- Loading state -->
     <div id="loading-screen" class="hidden">
       <div class="loader-inner">
@@ -101,8 +164,8 @@
         <div id="topbar-quicknav">
           <button id="btn-home" onclick="confirmHome()">Home</button>
           <div class="topnav-right">
-            <button id="btn-to-progress" onclick="switchScene('progress')">Progress</button>
-            <button id="btn-to-lessons" onclick="switchScene('lessons')">Lessons</button>
+            <button id="btn-to-progress" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+            <button id="btn-to-lessons" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
             <div id="auth-control-slideshow" class="auth-control"></div>
           </div>
         </div>
@@ -193,8 +256,8 @@
       <div id="study-topbar-quicknav">
         <button id="btn-home-study" onclick="confirmHome()">Home</button>
         <div class="topnav-right">
-          <button id="btn-to-progress-study" onclick="switchScene('progress')">Progress</button>
-          <button id="btn-to-lessons-study" onclick="switchScene('lessons')">Lessons</button>
+          <button id="btn-to-progress-study" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+          <button id="btn-to-lessons-study" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
           <div id="auth-control-study" class="auth-control"></div>
         </div>
       </div>
@@ -221,7 +284,7 @@
     <header id="progress-topbar">
       <button id="btn-home-progress" onclick="confirmHome()">Home</button>
       <div id="progress-course-name"></div>
-      <button id="btn-to-lessons-progress" onclick="switchScene('lessons')">Lessons</button>
+      <button id="btn-to-lessons-progress" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
       <!-- progress-topbar -->
       <div id="auth-control-progress" class="auth-control"></div>
       <button id="btn-back-progress" onclick="goBackFromProgress()">Back</button>
@@ -244,13 +307,13 @@
     <header id="lessons-topbar">
       <button id="btn-home-lessons" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
-        <button id="btn-to-progress-lessons" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-progress-lessons" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <!-- lessons-topbar, inside .topnav-right -->
         <div id="auth-control-lessons" class="auth-control"></div>
         <button id="btn-back-lessons" onclick="goBackFromProgress()">Back</button>
       </div>
     </header>
-    <main id="lessons-content">
+    <main id="lessons-content">w
       <h1 class="lessons-page-heading">My Lessons</h1>
       <div id="lesson-library" class="lesson-library-card hidden">
         <p class="lesson-library-heading">Lesson Library</p>
@@ -264,8 +327,8 @@
       <button id="btn-home-account" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
         <!-- account-topbar, inside .topnav-right -->
-        <button id="btn-to-progress-account" onclick="switchScene('progress')">Progress</button>
-        <button id="btn-to-lessons-account" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-progress-account" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-account" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <button id="btn-account-current" class="topnav-current" disabled>Account</button>
         <button id="btn-back-account" onclick="goBackFromProgress()">Back</button>
       </div>
