@@ -32,9 +32,9 @@ from db import (
     get_max_batch, deactivate_batch, get_active_quiz_questions, 
     save_item, unsave_item, get_saved_items, update_user_name,
     create_password_reset, get_valid_reset, consume_reset_token, 
-    create_class, archive_class, get_classes_for_teacher, generate_join_code,
-    get_valid_join_code_for_class, resolve_join_code, join_class, leave_class,
-    get_enrollments_for_class
+    create_class, archive_class, get_classes_for_teacher, get_classes_for_student,
+    get_user_role, generate_join_code, get_valid_join_code_for_class, 
+    resolve_join_code, join_class, leave_class, get_enrollments_for_class
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -139,7 +139,7 @@ def login():
     session["user_id"] = user["id"]
     claim_session(session["session_id"], user["id"])  # picks up any anonymous activity from this session
 
-    return jsonify({"ok": True, "email": user["email"]})
+    return jsonify({"ok": True, "email": user["email"], "role": user["role"]})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -401,7 +401,9 @@ def list_classes():
     user_id, _ = current_identity()
     if not user_id:
         return jsonify({"error": "Not logged in"}), 401
-    return jsonify({"classes": get_classes_for_teacher(user_id)})
+    if get_user_role(user_id) == "teacher":
+        return jsonify({"classes": get_classes_for_teacher(user_id)})
+    return jsonify({"classes": get_classes_for_student(user_id)})
 
 
 @app.route("/api/classes", methods=["POST"])
@@ -437,8 +439,8 @@ def generate_invite_code_route(class_id):
         return jsonify({"error": "Not logged in"}), 401
     if not require_teacher_owns_class(class_id, user_id):
         return jsonify({"error": "Class not found"}), 404
-    code = generate_join_code(class_id)
-    return jsonify({"ok": True, "code": code})
+    result = generate_join_code(class_id)
+    return jsonify({"ok": True, "code": result["code"], "expires_at": result["expires_at"]})
 
 
 @app.route("/api/classes/<int:class_id>/invite-code", methods=["GET"])
@@ -449,7 +451,7 @@ def get_current_invite_code(class_id):
     if not require_teacher_owns_class(class_id, user_id):
         return jsonify({"error": "Class not found"}), 404
     row = get_valid_join_code_for_class(class_id)
-    return jsonify({"code": row["code"] if row else None})
+    return jsonify({"code": row["code"] if row else None, "expires_at": row["expires_at"] if row else None})
 
 
 @app.route("/api/classes/<int:class_id>/roster", methods=["GET"])

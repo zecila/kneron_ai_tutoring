@@ -821,7 +821,7 @@ html, body {
   color: var(--accent);
 }
 
-/* ── create class/assignment button ───────────────────────────────────────────────────────────── */
+/* ── create class/assignment  ───────────────────────────────────────────────────────────── */
 
 .section-header-row {
   display: flex;
@@ -849,7 +849,7 @@ html, body {
   opacity: 0.85;
 }
 
-#new-class-name {
+#new-class-name, #join-class-code {
   padding: 10px 14px;
   border-radius: var(--radius);
   border: 1px solid var(--border);
@@ -859,12 +859,12 @@ html, body {
   font-family: var(--font-body);
 }
 
-#new-class-name:focus {
+#new-class-name:focus, #join-class-code:focus {
   outline: none;
   border-color: var(--accent);
 }
 
-#create-class-modal {
+#create-class-modal, #join-class-modal {
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -873,17 +873,17 @@ html, body {
   justify-content: center;
 }
 
-#create-class-modal.hidden {
+#create-class-modal.hidden, #join-class-modal.hidden {
   display: none !important;
 }
 
-#create-class-modal-backdrop {
+#create-class-modal-backdrop, #join-class-modal-backdrop {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
 }
 
-#create-class-modal-dialog {
+#create-class-modal-dialog, #join-class-modal-dialog {
   position: relative;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -897,7 +897,7 @@ html, body {
   min-width: 340px;
 }
 
-#create-class-modal-title {
+#create-class-modal-title, #join-class-modal-title {
   font-family: var(--font-display);
   font-size: 1.2rem;
   color: var(--surface);
@@ -905,14 +905,14 @@ html, body {
   margin-bottom: 8px;
 }
 
-#create-class-modal-buttons {
+#create-class-modal-buttons, #join-class-modal-buttons {
   display: flex;
   justify-content: center;
   gap: 12px;
   margin-top: 12px;
 }
 
-#btn-cancel-class {
+#btn-cancel-class, #btn-cancel-join-class {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text-muted);
@@ -924,12 +924,12 @@ html, body {
   transition: border-color 200ms, color 200ms;
 }
 
-#btn-cancel-class:hover {
+#btn-cancel-class:hover, #btn-cancel-join-class:hover {
   border-color: var(--surface);
   color: var(--surface);
 }
 
-#btn-submit-class {
+#btn-submit-class, #btn-submit-join-class {
   background: var(--accent);
   border: 1px solid var(--accent);
   color: white;
@@ -941,7 +941,7 @@ html, body {
   transition: background 200ms, border-color 200ms;
 }
 
-#btn-submit-class:hover {
+#btn-submit-class:hover, #btn-submit-join-class:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
 }
@@ -950,6 +950,154 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 6px 14px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 200ms, color 200ms;
+}
+
+.btn-secondary:hover {
+  border-color: var(--surface);
+  color: var(--surface);
+}
+
+#invite-code-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#invite-code-modal.hidden {
+  display: none !important;
+}
+
+#invite-code-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#invite-code-modal-dialog {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  z-index: 1;
+  min-width: 340px;
+}
+
+#invite-code-modal-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  color: var(--surface);
+  margin-bottom: 8px;
+}
+
+#invite-code-display {
+  font-family: var(--font-mono);
+  font-size: 2rem;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+}
+
+#invite-code-expiry {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+#invite-code-modal-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+#btn-close-invite-modal {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 200ms, color 200ms;
+}
+
+#btn-close-invite-modal:hover {
+  border-color: var(--surface);
+  color: var(--surface);
+}
+
+#btn-regenerate-code {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 200ms, border-color 200ms;
+}
+
+#btn-regenerate-code:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+}
+
+/* ── Student roster page ─────────────────────────────────────────────────────────────── */
+.detail-tabs {
+  display: flex;
+  gap: 20px;
+}
+
+.detail-tab-btn {
+  background: none;
+  border: none;
+  padding: 0 0 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 200ms, border-color 200ms;
+}
+
+.detail-tab-btn:hover { color: var(--accent); }
+
+.detail-tab-btn.tab-active {
+  color: var(--surface);
+  font-weight: 500;
+  border-bottom-color: var(--accent);
+}
+
+#class-detail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 720px;
 }
 
 /* ── App layout ─────────────────────────────────────────────────────────────── */
@@ -2529,8 +2677,8 @@ html, body {
 /* ── Progress tab (topbar + study-topbar) ───────────────────────────────────
    Not a real button yet — will move into a persistent home nav later
    (login/signup etc.), so strip the button chrome and treat it as a label. */
-#btn-to-progress, #btn-to-progress-study, #btn-to-progress-lessons,
-#btn-to-lessons, #btn-to-lessons-welcome, #btn-to-lessons-study,
+#btn-to-progress, #btn-to-progress-study, #btn-to-progress-lessons, #btn-to-progress-classes,
+#btn-to-lessons, #btn-to-lessons-welcome, #btn-to-lessons-study,#btn-to-lessons-classes,
 #btn-to-lessons-progress, #btn-to-classes-welcome {
   background: none;
   border: none;
@@ -2543,8 +2691,8 @@ html, body {
   transition: color 200ms;
 }
 
-#btn-to-progress:hover, #btn-to-progress-study:hover, #btn-to-progress-lessons:hover,
-#btn-to-lessons:hover, #btn-to-lessons-welcome:hover, #btn-to-lessons-study:hover,
+#btn-to-progress:hover, #btn-to-progress-study:hover, #btn-to-progress-lessons:hover, #btn-to-progress-classes:hover,
+#btn-to-lessons:hover, #btn-to-lessons-welcome:hover, #btn-to-lessons-study:hover, #btn-to-lessons-classes:hover,
 #btn-to-lessons-progress:hover, #btn-to-classes-welcome:hover {
   color: var(--accent);
 }

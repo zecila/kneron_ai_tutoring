@@ -20,9 +20,9 @@
     <!-- Welcome / Home screen -->
     <div id="welcome-screen">
       <div class="topnav-right">
+        <button id="btn-to-classes-welcome" onclick="switchScene('classes')" class="hidden">Classes</button>
         <button id="btn-to-progress-welcome" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <button id="btn-to-lessons-welcome" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
-        <button id="btn-to-classes-welcome" onclick="switchScene('classes')" class="hidden">Classes</button>
         <div id="auth-control-welcome" class="auth-control"></div>
       </div>
       <div class="welcome-inner">
@@ -70,6 +70,8 @@
     <header id="classes-topbar">
       <button id="btn-home-classes" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
+        <button id="btn-to-progress-classes" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-classes" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <div id="auth-control-classes" class="auth-control"></div>
         <button id="btn-back-classes" onclick="showWelcome()">Back</button>
       </div>
@@ -78,6 +80,7 @@
       <div class="section-header-row">
         <h1 class="lessons-page-heading">Classes</h1>
         <button id="btn-create-class" class="btn-small">+ Create Class</button>
+        <button id="btn-add-class" class="btn-small hidden">+ Add Class</button>
       </div>
       <div id="create-class-modal" class="hidden">
         <div id="create-class-modal-backdrop" onclick="hideCreateClassForm()"></div>
@@ -88,6 +91,19 @@
           <div id="create-class-modal-buttons">
             <button id="btn-cancel-class" onclick="hideCreateClassForm()">Cancel</button>
             <button id="btn-submit-class">Create</button>
+          </div>
+        </div>
+      </div>
+      <div id="join-class-modal" class="hidden">
+        <div id="join-class-modal-backdrop" onclick="hideJoinClassForm()"></div>
+        <div id="join-class-modal-dialog">
+          <p id="join-class-modal-title">Add a Class</p>
+          <label class="auth-label" for="join-class-code">Invite code</label>
+          <input type="text" id="join-class-code" autocomplete="off">
+          <p id="join-class-error" class="auth-error"></p>
+          <div id="join-class-modal-buttons">
+            <button id="btn-cancel-join-class" onclick="hideJoinClassForm()">Cancel</button>
+            <button id="btn-submit-join-class">Join</button>
           </div>
         </div>
       </div>
@@ -103,16 +119,29 @@
       <button id="btn-home-class-detail" onclick="confirmHome()">Home</button>
       <div id="class-detail-name"></div>
       <div class="topnav-right">
+        <div id="auth-control-class-detail" class="auth-control"></div>
         <button id="btn-back-class-detail" onclick="switchScene('classes')">Back</button>
       </div>
     </header>
     <main id="class-detail-content">
-      <div id="class-invite-row" class="lesson-library-card">
-        <div class="section-header-row">
-          <p class="lesson-library-heading">Invite Code</p>
-          <button id="btn-regenerate-code" class="btn-small">Generate</button>
+      <div class="section-header-row">
+        <div class="detail-tabs">
+          <button id="btn-tab-assignments" class="detail-tab-btn tab-active" onclick="switchClassDetailTab('assignments')">Assignments</button>
+          <button id="btn-tab-students" class="detail-tab-btn" onclick="switchClassDetailTab('students')">Students</button>
         </div>
-        <span id="class-invite-code"></span>
+        <button id="btn-open-invite-modal" class="btn-secondary">Invite Code</button>
+      </div>
+      <div id="invite-code-modal" class="hidden">
+        <div id="invite-code-modal-backdrop" onclick="hideInviteCodeModal()"></div>
+        <div id="invite-code-modal-dialog">
+          <p id="invite-code-modal-title">Invite Code</p>
+          <div id="invite-code-display"></div>
+          <p id="invite-code-expiry"></p>
+          <div id="invite-code-modal-buttons">
+            <button id="btn-close-invite-modal" onclick="hideInviteCodeModal()">Close</button>
+            <button id="btn-regenerate-code">Regenerate</button>
+          </div>
+        </div>
       </div>
       <div id="class-assignments" class="lesson-library-card">
         <div class="section-header-row">
@@ -121,8 +150,8 @@
         </div>
         <div id="assignments-list"></div>
       </div>
-      <div id="class-roster" class="lesson-library-card">
-        <p class="lesson-library-heading">Roster</p>
+      <div id="class-roster" class="lesson-library-card hidden">
+        <p class="lesson-library-heading">Students</p>
         <div id="roster-list"></div>
       </div>
     </main>

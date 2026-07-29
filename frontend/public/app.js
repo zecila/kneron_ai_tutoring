@@ -57,7 +57,7 @@ async function checkAuth() {
 function applyRoleNav() {
   const isTeacher = currentUser?.role === "teacher";
   document.querySelectorAll(".nav-progress-btn, .nav-lessons-btn").forEach(el => el.classList.toggle("hidden", isTeacher));
-  document.querySelectorAll("#btn-to-classes-welcome").forEach(el => el.classList.toggle("hidden", !isTeacher));
+  document.querySelectorAll("#btn-to-classes-welcome").forEach(el => el.classList.toggle("hidden", !currentUser));
 }
 
 function renderAuthButton() {
@@ -276,8 +276,9 @@ function initAuthForm() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong");
 
-      currentUser = { email: data.email };
+      currentUser = { email: data.email, role: data.role };
       renderAuthButton();
+      applyRoleNav();
       form.reset();
       resetPasswordVisibility(document.getElementById("auth-password"), document.getElementById("auth-password-toggle"));
       loadLessonLibrary();
@@ -431,6 +432,7 @@ async function logout() {
   const pwToggle = document.getElementById("auth-password-toggle");
   if (pwInput && pwToggle) resetPasswordVisibility(pwInput, pwToggle);
   renderAuthButton();
+  applyRoleNav();
   showWelcome();
 }
 
@@ -438,6 +440,10 @@ async function logout() {
 let activeClassId = null;
 
 async function loadClassesPage() {
+  const isTeacher = currentUser?.role === "teacher";
+  document.getElementById("btn-create-class").classList.toggle("hidden", !isTeacher);
+  document.getElementById("btn-add-class").classList.toggle("hidden", isTeacher);
+
   const res = await fetch("/api/classes");
   const data = await res.json();
   const list = document.getElementById("classes-list-items");
@@ -446,7 +452,7 @@ async function loadClassesPage() {
     const row = document.createElement("div");
     row.className = "lesson-library-item";
     row.textContent = c.name;
-    row.onclick = () => openClassDetail(c.id, c.name);
+    if (isTeacher) row.onclick = () => openClassDetail(c.id, c.name);
     list.appendChild(row);
   });
 }
@@ -476,37 +482,109 @@ async function openClassDetail(classId, className) {
   activeClassId = classId;
   document.getElementById("class-detail-name").textContent = className;
   switchScene("class-detail");
-  loadClassDetail(classId);
+  switchClassDetailTab("assignments"); // reset to default tab each time a class is opened
 }
 
-async function loadClassDetail(classId) {
-  const codeRes = await fetch(`/api/classes/${classId}/invite-code`);  // GET, not POST. read-only  
-  // NOTE: temporary — calling invite-code on every page load regenerates it.
-  // Swap for a GET-current-code endpoint before shipping; see note below.
-  const codeData = await codeRes.json();
-  document.getElementById("class-invite-code").textContent = codeData.code || "No active code — click Regenerate";
+function switchClassDetailTab(tab) {
+  document.getElementById("btn-tab-assignments").classList.toggle("tab-active", tab === "assignments");
+  document.getElementById("btn-tab-students").classList.toggle("tab-active", tab === "students");
+  document.getElementById("class-assignments").classList.toggle("hidden", tab !== "assignments");
+  document.getElementById("class-roster").classList.toggle("hidden", tab !== "students");
+  if (tab === "students") loadRoster();
+}
 
-  const rosterRes = await fetch(`/api/classes/${classId}/roster`);
-  const rosterData = await rosterRes.json();
-  const rosterList = document.getElementById("roster-list");
-  rosterList.innerHTML = "";
-  (rosterData.students || []).forEach(s => {
+async function loadRoster() {
+  const res = await fetch(`/api/classes/${activeClassId}/roster`);
+  const data = await res.json();
+  const list = document.getElementById("roster-list");
+  list.innerHTML = "";
+  (data.students || []).forEach(s => {
     const row = document.createElement("div");
     row.className = "lesson-library-item";
-    row.textContent = `${s.first_name} ${s.last_name} — joined ${s.joined_at}`;
-    rosterList.appendChild(row);
+    row.textContent = s.name;
+    list.appendChild(row);
   });
 }
 
-document.getElementById("btn-regenerate-code")?.addEventListener("click", async () => {
+document.getElementById("btn-open-invite-modal")?.addEventListener("click", async () => {
+  document.getElementById("invite-code-modal").classList.remove("hidden");
+  const res = await fetch(`/api/classes/${activeClassId}/invite-code`);  // GET, read-only
+  const data = await res.json();
+  if (data.code) {
+    renderInviteCode(data.code, data.expires_at);
+  } else {
+    await regenerateInviteCode();  // first time — auto-generate
+  }
+});
+
+function hideInviteCodeModal() {
+  document.getElementById("invite-code-modal").classList.add("hidden");
+  clearInterval(inviteCountdownTimer);
+}
+
+document.getElementById("btn-regenerate-code")?.addEventListener("click", regenerateInviteCode);
+
+async function regenerateInviteCode() {
   const res = await fetch(`/api/classes/${activeClassId}/invite-code`, { method: "POST" });
   const data = await res.json();
-  document.getElementById("class-invite-code").textContent = data.code || "";
-  document.getElementById("btn-regenerate-code").textContent = "Regenerate";  // switches label after first generation
-});
+  renderInviteCode(data.code, data.expires_at);
+}
+
+let inviteCountdownTimer = null;
+
+function renderInviteCode(code, expiresAt) {
+  document.getElementById("invite-code-display").textContent = code;
+  clearInterval(inviteCountdownTimer);
+  updateInviteExpiryText(expiresAt);
+  inviteCountdownTimer = setInterval(() => updateInviteExpiryText(expiresAt), 1000);
+}
+
+function updateInviteExpiryText(expiresAt) {
+  const msLeft = new Date(expiresAt) - new Date();
+  const el = document.getElementById("invite-code-expiry");
+  if (msLeft <= 0) {
+    clearInterval(inviteCountdownTimer);
+    el.textContent = "Invite code expired. Generate a new one.";
+    return;
+  }
+  const mins = Math.max(1, Math.round(msLeft / 60000));
+  el.textContent = `Valid for ${mins} more minute${mins === 1 ? "" : "s"}`;
+}
 
 document.getElementById("btn-create-assignment")?.addEventListener("click", () => {
   alert("Assignment creation coming soon.");
+});
+
+// CLASSES: STUDENT
+document.getElementById("btn-add-class")?.addEventListener("click", () => {
+  document.getElementById("join-class-modal").classList.remove("hidden");
+});
+
+function hideJoinClassForm() {
+  document.getElementById("join-class-modal").classList.add("hidden");
+  document.getElementById("join-class-code").value = "";
+  document.getElementById("join-class-error").textContent = "";
+}
+
+document.getElementById("btn-submit-join-class")?.addEventListener("click", async () => {
+  const code = document.getElementById("join-class-code").value.trim().toUpperCase();
+  const errorEl = document.getElementById("join-class-error");
+  errorEl.textContent = "";
+  if (!code) return;
+
+  try {
+    const res = await fetch("/api/classes/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Invalid or expired code");
+    hideJoinClassForm();
+    loadClassesPage();
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────

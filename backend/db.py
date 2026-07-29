@@ -272,19 +272,38 @@ def get_classes_for_teacher(teacher_id, include_archived=False):
     conn.close()
     return [dict(r) for r in rows]
 
+def get_classes_for_student(student_id):
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT classes.* FROM classes
+           JOIN enrollments ON enrollments.class_id = classes.id
+           WHERE enrollments.student_id = ? AND classes.archived = 0""",
+        (student_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_user_role(user_id):
+    conn = get_db()
+    row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row["role"] if row else None
+
 
 def generate_join_code(class_id, ttl_minutes=30, length=6):
     conn = get_db()
     alphabet = string.ascii_uppercase + string.digits
     code = "".join(secrets.choice(alphabet) for _ in range(length))
     now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(minutes=ttl_minutes)).isoformat()
     conn.execute(
         "INSERT INTO join_codes (code, class_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
-        (code, class_id, (now + timedelta(minutes=ttl_minutes)).isoformat(), now.isoformat())
+        (code, class_id, expires_at, now.isoformat())
     )
     conn.commit()
     conn.close()
-    return code
+    return {"code": code, "expires_at": expires_at}
 
 
 def get_valid_join_code_for_class(class_id):
