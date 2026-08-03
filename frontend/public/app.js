@@ -451,10 +451,33 @@ async function loadClassesPage() {
   (data.classes || []).forEach(c => {
     const row = document.createElement("div");
     row.className = "lesson-library-item";
-    row.textContent = c.name;
-    if (isTeacher) row.onclick = () => openClassDetail(c.id, c.name);
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "lesson-library-name";
+    nameSpan.textContent = c.name;
+    row.appendChild(nameSpan);
+
+    if (isTeacher) {
+      row.onclick = () => openClassDetail(c.id, c.name);
+    } else {
+      const leaveBtn = document.createElement("button");
+      leaveBtn.className = "lesson-library-delete";
+      leaveBtn.setAttribute("aria-label", "Leave class");
+      leaveBtn.textContent = "✕";
+      leaveBtn.onclick = (e) => {
+        e.stopPropagation();
+        confirmLeaveClass(c.id, c.name);
+      };
+      row.appendChild(leaveBtn);
+    }
     list.appendChild(row);
   });
+}
+
+function confirmLeaveClass(classId, name) {
+  pendingDeleteAction = { type: "leaveClass", classId };
+  document.getElementById("delete-modal-message").textContent = `Leaving "${name}". Are you sure?`;
+  document.getElementById("delete-modal").classList.remove("hidden");
 }
 
 document.getElementById("btn-create-class")?.addEventListener("click", () => {
@@ -468,12 +491,16 @@ function hideCreateClassForm() {
 
 document.getElementById("btn-submit-class")?.addEventListener("click", async () => {
   const name = document.getElementById("new-class-name").value.trim();
+  const errorEl = document.getElementById("create-class-error");
+  errorEl.textContent = "";
   if (!name) return;
-  await fetch("/api/classes", {
+  const res = await fetch("/api/classes", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
+  const data = await res.json();
+  if (!res.ok) { errorEl.textContent = data.error || "Could not create class"; return; }
   hideCreateClassForm();
   loadClassesPage();
 });
@@ -481,8 +508,9 @@ document.getElementById("btn-submit-class")?.addEventListener("click", async () 
 async function openClassDetail(classId, className) {
   activeClassId = classId;
   document.getElementById("class-detail-name").textContent = className;
+  document.getElementById("class-detail-heading").textContent = className;
   switchScene("class-detail");
-  switchClassDetailTab("assignments"); // reset to default tab each time a class is opened
+  switchClassDetailTab("assignments");
 }
 
 function switchClassDetailTab(tab) {
@@ -493,6 +521,12 @@ function switchClassDetailTab(tab) {
   if (tab === "students") loadRoster();
 }
 
+function confirmRemoveStudent(classId, studentId, name) {
+  pendingDeleteAction = { type: "removeStudent", classId, studentId };
+  document.getElementById("delete-modal-message").textContent = `Removing ${name} from this class. Are you sure?`;
+  document.getElementById("delete-modal").classList.remove("hidden");
+}
+
 async function loadRoster() {
   const res = await fetch(`/api/classes/${activeClassId}/roster`);
   const data = await res.json();
@@ -501,7 +535,25 @@ async function loadRoster() {
   (data.students || []).forEach(s => {
     const row = document.createElement("div");
     row.className = "lesson-library-item";
-    row.textContent = s.name;
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "lesson-library-name";
+    nameSpan.textContent = `${s.first_name} ${s.last_name}`;
+
+    const joinedSpan = document.createElement("span");
+    joinedSpan.className = "lesson-library-status";
+    joinedSpan.textContent = `Joined ${new Date(s.joined_at).toLocaleDateString()}`;
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "lesson-library-delete";
+    deleteBtn.setAttribute("aria-label", "Remove student");
+    deleteBtn.textContent = "✕";
+    deleteBtn.onclick = (e) => {
+      e.stopPropagation();
+      confirmRemoveStudent(activeClassId, s.id, `${s.first_name} ${s.last_name}`);
+    };
+
+    row.append(nameSpan, joinedSpan, deleteBtn);
     list.appendChild(row);
   });
 }
@@ -550,6 +602,13 @@ function updateInviteExpiryText(expiresAt) {
   const mins = Math.max(1, Math.round(msLeft / 60000));
   el.textContent = `Valid for ${mins} more minute${mins === 1 ? "" : "s"}`;
 }
+
+document.getElementById("btn-archive-class")?.addEventListener("click", () => {
+  pendingDeleteAction = { type: "archiveClass", classId: activeClassId };
+  document.getElementById("delete-modal-message").textContent =
+    "Archiving this class. Students will no longer see it, and it can't be reopened from here. Are you sure?";
+  document.getElementById("delete-modal").classList.remove("hidden");
+});
 
 document.getElementById("btn-create-assignment")?.addEventListener("click", () => {
   alert("Assignment creation coming soon.");
@@ -849,6 +908,31 @@ async function confirmDeleteModal() {
       showWelcome();
     } catch (err) {
       console.warn("Could not delete account:", err.message);
+    }
+  } else if (action.type === "removeStudent") {
+    try {
+      const res = await fetch(`/api/classes/${action.classId}/students/${action.studentId}/remove`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      loadRoster();
+    } catch (err) {
+      console.warn("Could not remove student:", err.message);
+    }
+  } else if (action.type === "archiveClass") {
+    try {
+      const res = await fetch(`/api/classes/${action.classId}/archive`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      switchScene("classes");
+      loadClassesPage();
+    } catch (err) {
+      console.warn("Could not archive class:", err.message);
+    }
+  } else if (action.type === "leaveClass") {
+    try {
+      const res = await fetch(`/api/classes/${action.classId}/leave`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      loadClassesPage();
+    } catch (err) {
+      console.warn("Could not leave class:", err.message);
     }
   }
 }

@@ -88,6 +88,7 @@
           <p id="create-class-modal-title">Create Class</p>
           <label class="auth-label" for="new-class-name">Class name</label>
           <input type="text" id="new-class-name">
+          <p id="create-class-error" class="auth-error"></p>
           <div id="create-class-modal-buttons">
             <button id="btn-cancel-class" onclick="hideCreateClassForm()">Cancel</button>
             <button id="btn-submit-class">Create</button>
@@ -124,6 +125,10 @@
       </div>
     </header>
     <main id="class-detail-content">
+      <div id="class-detail-heading-row">
+        <h1 id="class-detail-heading" class="lessons-page-heading"></h1>
+        <button id="btn-archive-class" class="btn-secondary">Archive Class</button>
+      </div>
       <div class="section-header-row">
         <div class="detail-tabs">
           <button id="btn-tab-assignments" class="detail-tab-btn tab-active" onclick="switchClassDetailTab('assignments')">Assignments</button>

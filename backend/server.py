@@ -464,6 +464,17 @@ def class_roster(class_id):
     return jsonify({"students": get_enrollments_for_class(class_id)})
 
 
+@app.route("/api/classes/<int:class_id>/students/<int:student_id>/remove", methods=["POST"])
+def remove_student_route(class_id, student_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    leave_class(class_id, student_id)
+    return jsonify({"ok": True})
+
+
 @app.route("/api/classes/join", methods=["POST"])
 def join_class_route():
     user_id, _ = current_identity()

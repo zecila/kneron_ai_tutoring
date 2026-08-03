@@ -1100,6 +1100,30 @@ html, body {
   max-width: 720px;
 }
 
+#class-detail-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 720px;
+}
+
+#class-detail-heading-row #btn-archive-class {
+  opacity: 0;
+  transition: opacity 150ms;
+}
+
+#class-detail-heading-row:hover #btn-archive-class {
+  opacity: 1;
+}
+
+.roster-joined {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
 /* ── App layout ─────────────────────────────────────────────────────────────── */
 #slideshow {
   display: grid;
