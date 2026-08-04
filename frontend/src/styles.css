@@ -952,6 +952,13 @@ html, body {
   gap: 6px;
 }
 
+#assignments-list,
+#roster-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .btn-secondary {
   background: transparent;
   border: 1px solid var(--border);
@@ -1065,6 +1072,265 @@ html, body {
   border-color: var(--accent-dim);
 }
 
+
+#create-assignment-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#create-assignment-modal.hidden {
+  display: none !important;
+}
+
+#create-assignment-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#create-assignment-modal-dialog {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  z-index: 1;
+  min-width: 420px;
+}
+
+#create-assignment-modal-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  color: var(--surface);
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+#create-assignment-modal-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+#btn-cancel-assignment {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 200ms, color 200ms;
+}
+
+#btn-cancel-assignment:hover {
+  border-color: var(--surface);
+  color: var(--surface);
+}
+
+#assignment-file-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assignment-preview-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 28px;
+  background: var(--accent);
+}
+
+.assignment-preview-banner.hidden {
+  display: none !important;
+}
+
+.assignment-preview-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: white;
+}
+
+.assignment-preview-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.assignment-preview-actions .btn-secondary {
+  border-color: white;
+  color: white;
+}
+
+.assignment-preview-actions .btn-secondary:hover {
+  border-color: white;
+  color: white;
+  opacity: 0.8;
+}
+
+.assignment-preview-actions .btn-generate {
+  background: white;
+  color: var(--accent);
+}
+
+.assignment-preview-actions .btn-generate:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.assignment-preview-frame {
+  grid-row: 3 / -1;
+  grid-column: 1 / -1;
+  pointer-events: none;
+  border-left: 4px solid var(--accent);
+  border-right: 4px solid var(--accent);
+  border-bottom: 4px solid var(--accent);
+  z-index: 5;
+}
+
+.assignment-preview-frame.hidden {
+  display: none !important;
+}
+
+#toast {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  color: var(--bg);
+  padding: 10px 22px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  z-index: 2000;
+  opacity: 1;
+  transition: opacity 300ms;
+}
+
+#toast.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+
+#publish-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#publish-modal.hidden {
+  display: none !important;
+}
+
+#publish-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#publish-modal-dialog {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  z-index: 1;
+  min-width: 420px;
+}
+
+#publish-modal-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  color: var(--surface);
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+#publish-due-date,
+#publish-max-attempts {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+  color-scheme: dark;
+}
+
+#publish-due-date:focus,
+#publish-max-attempts:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#publish-modal-error {
+  margin-top: 4px;
+}
+
+#publish-modal-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+#btn-cancel-publish {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 200ms, color 200ms;
+}
+
+#btn-cancel-publish:hover {
+  border-color: var(--surface);
+  color: var(--surface);
+}
+
+#btn-confirm-publish {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 200ms, border-color 200ms;
+}
+
+#btn-confirm-publish:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+}
+
 /* ── Student roster page ─────────────────────────────────────────────────────────────── */
 .detail-tabs {
   display: flex;
@@ -1127,16 +1393,22 @@ html, body {
 /* ── App layout ─────────────────────────────────────────────────────────────── */
 #slideshow {
   display: grid;
-  grid-template-rows: 84px 1fr 64px;
+  grid-template-rows: 84px auto 1fr 64px;
   grid-template-columns: minmax(150px, 18vw) 26px 1fr;
   grid-template-areas:
     "topbar  topbar  topbar"
+    "banner  banner  banner"
     "sidebar toggle  stage"
     "sidebar controls  controls";
   height: 100vh;
   overflow: hidden;
   transition: grid-template-columns 200ms ease;
-  background: var(--stage_bg); /* fills toggle column + any gaps */
+  background: var(--stage_bg);
+}
+
+#assignment-preview-banner-slideshow,
+#assignment-preview-banner-study {
+  grid-area: banner;
 }
 
 /* Info panel open: add right column */
@@ -1144,6 +1416,7 @@ html, body {
   grid-template-columns: minmax(150px, 18vw) 26px 1fr minmax(280px, 22%);
   grid-template-areas:
     "topbar  topbar   topbar      topbar"
+    "banner  banner   banner      banner"
     "sidebar toggle   stage       info-panel"
     "sidebar controls controls    info-panel";
 }
@@ -2632,13 +2905,18 @@ html, body {
 /* ── Study scene ─────────────────────────────────────────────────────────────── */
 #study {
   display: grid;
-  grid-template-rows: 84px 1fr;
+  grid-template-rows: 84px auto 1fr;
   grid-template-columns: minmax(180px, 18vw) 1fr;
   grid-template-areas:
     "study-topbar study-topbar"
+    "study-banner study-banner"
     "concept-nav  concept-stage";
   height: 100vh;
   overflow: hidden;
+}
+
+#assignment-preview-banner-study {
+  grid-area: study-banner;
 }
 
 #study-topbar {
@@ -2698,12 +2976,10 @@ html, body {
   color: var(--accent);
 }
 
-/* ── Progress tab (topbar + study-topbar) ───────────────────────────────────
-   Not a real button yet — will move into a persistent home nav later
-   (login/signup etc.), so strip the button chrome and treat it as a label. */
+/* ── Progress tab (topbar + study-topbar) ───────────────────────────────────*/
 #btn-to-progress, #btn-to-progress-study, #btn-to-progress-lessons, #btn-to-progress-classes,
 #btn-to-lessons, #btn-to-lessons-welcome, #btn-to-lessons-study,#btn-to-lessons-classes,
-#btn-to-lessons-progress, #btn-to-classes-welcome {
+#btn-to-lessons-progress, .nav-classes-btn, .nav-progress-btn, .nav-lessons-btn, .nav-assignments-btn {
   background: none;
   border: none;
   padding: 0;
@@ -2717,7 +2993,8 @@ html, body {
 
 #btn-to-progress:hover, #btn-to-progress-study:hover, #btn-to-progress-lessons:hover, #btn-to-progress-classes:hover,
 #btn-to-lessons:hover, #btn-to-lessons-welcome:hover, #btn-to-lessons-study:hover, #btn-to-lessons-classes:hover,
-#btn-to-lessons-progress:hover, #btn-to-classes-welcome:hover {
+#btn-to-lessons-progress:hover, .nav-classes-btn:hover, .nav-progress-btn:hover, 
+.nav-lessons-btn:hover, .nav-assignments-btn:hover {
   color: var(--accent);
 }
 
@@ -3346,6 +3623,18 @@ html, body {
 .card-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .card-btn:disabled { opacity: 0.25; cursor: default; }
 
+.quiz-attempts-remaining {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.quiz-attempts-remaining:has(+ .card-btn:disabled) {
+  color: var(--red);
+}
+
 /* ── Quiz ────────────────────────────────────────────────────────────────────── */
 .quiz-question {
   font-size: 1.05rem;
@@ -3656,6 +3945,39 @@ html, body {
   font-size: 24px;
   color: var(--surface);
   margin: 0 0 10px;
+}
+
+.progress-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+}
+
+.progress-source-badge {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.progress-source-personal {
+  background: var(--sidebar_bg);
+  color: var(--text-muted);
+}
+
+.progress-source-class {
+  background: var(--accent-dim);
+  color: var(--surface);
+}
+
+.progress-due-date {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
 }
 
 .progress-avg-score {

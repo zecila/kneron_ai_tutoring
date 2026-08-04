@@ -20,7 +20,7 @@
     <!-- Welcome / Home screen -->
     <div id="welcome-screen">
       <div class="topnav-right">
-        <button id="btn-to-classes-welcome" onclick="switchScene('classes')" class="hidden">Classes</button>
+        <button id="btn-to-classes-welcome" onclick="switchScene('classes')" class="nav-classes-btn hidden">Classes</button>
         <button id="btn-to-progress-welcome" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <button id="btn-to-lessons-welcome" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <div id="auth-control-welcome" class="auth-control"></div>
@@ -120,6 +120,9 @@
       <button id="btn-home-class-detail" onclick="confirmHome()">Home</button>
       <div id="class-detail-name"></div>
       <div class="topnav-right">
+        <button id="btn-to-classes-class-detail" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+        <button id="btn-to-lessons-class-detail" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-progress-class-detail" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <div id="auth-control-class-detail" class="auth-control"></div>
         <button id="btn-back-class-detail" onclick="switchScene('classes')">Back</button>
       </div>
@@ -154,6 +157,28 @@
           <button id="btn-create-assignment" class="btn-small">+ Create Assignment</button>
         </div>
         <div id="assignments-list"></div>
+      </div>
+      <div id="create-assignment-modal" class="hidden">
+        <div id="create-assignment-modal-backdrop" onclick="hideCreateAssignmentForm()"></div>
+        <div id="create-assignment-modal-dialog">
+          <p id="create-assignment-modal-title">Create Assignment</p>
+          <div class="upload-area" id="assignment-upload-area">
+            <div class="upload-icon">⬆</div>
+            <p class="upload-hint">Drop a file here, or click to browse</p>
+            <p class="upload-types">PDF · DOCX · PPTX</p>
+            <input type="file" id="assignment-file-input" accept=".pdf,.docx,.pptx" />
+          </div>
+          <div id="assignment-file-status" class="file-status hidden">
+            <span class="file-icon">📄</span>
+            <span id="assignment-file-name"></span>
+            <button class="file-clear" onclick="clearAssignmentFile()">✕</button>
+          </div>
+          <p id="create-assignment-error" class="auth-error"></p>
+          <div id="create-assignment-modal-buttons">
+            <button id="btn-cancel-assignment" onclick="hideCreateAssignmentForm()">Cancel</button>
+            <button id="btn-generate-assignment" class="btn-generate" onclick="generateAssignment()" disabled>Generate Lesson →</button>
+          </div>
+        </div>
       </div>
       <div id="class-roster" class="lesson-library-card hidden">
         <p class="lesson-library-heading">Students</p>
@@ -198,8 +223,10 @@
         <div id="topbar-quicknav">
           <button id="btn-home" onclick="confirmHome()">Home</button>
           <div class="topnav-right">
+            <button id="btn-to-classes-slideshow" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
             <button id="btn-to-progress" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
             <button id="btn-to-lessons" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+            <button id="btn-to-assignments-slideshow" class="nav-assignments-btn hidden" onclick="goToAssignments()">Assignments</button>
             <div id="auth-control-slideshow" class="auth-control"></div>
           </div>
         </div>
@@ -208,6 +235,16 @@
           <button id="btn-to-study" onclick="switchScene('study')">Study &#8594;</button>
         </div>
       </header>
+
+      <div id="assignment-preview-banner-slideshow" class="assignment-preview-banner hidden">
+        <span class="assignment-preview-label">Student View</span>
+        <div class="assignment-preview-actions">
+          <button id="btn-discard-assignment-slideshow" class="btn-secondary" onclick="confirmDiscardAssignment()">Discard</button>
+          <button id="btn-save-draft-slideshow" class="btn-secondary" onclick="saveAssignmentAsDraft()">Save as Draft</button>
+          <button id="btn-publish-assignment-slideshow" class="btn-generate" onclick="showPublishModal()">Publish</button>
+        </div>
+      </div>
+      <div id="assignment-preview-frame-slideshow" class="assignment-preview-frame hidden"></div>
 
       <!-- Slide stage -->
       <main id="stage">
@@ -290,8 +327,10 @@
       <div id="study-topbar-quicknav">
         <button id="btn-home-study" onclick="confirmHome()">Home</button>
         <div class="topnav-right">
+          <button id="btn-to-classes-study" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
           <button id="btn-to-progress-study" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
           <button id="btn-to-lessons-study" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+          <button id="btn-to-assignments-study" class="nav-assignments-btn hidden" onclick="goToAssignments()">Assignments</button>
           <div id="auth-control-study" class="auth-control"></div>
         </div>
       </div>
@@ -300,6 +339,16 @@
         <button id="btn-to-slides" onclick="switchScene('slideshow')">&#8592; Slides</button>
       </div>
     </header>
+
+    <div id="assignment-preview-banner-study" class="assignment-preview-banner hidden">
+      <span class="assignment-preview-label">Student View</span>
+      <div class="assignment-preview-actions">
+        <button id="btn-discard-assignment-study" class="btn-secondary" onclick="confirmDiscardAssignment()">Discard</button>
+        <button id="btn-save-draft-study" class="btn-secondary" onclick="saveAssignmentAsDraft()">Save as Draft</button>
+        <button id="btn-publish-assignment-study" class="btn-generate" onclick="showPublishModal()">Publish</button>
+      </div>
+    </div>
+    <div id="assignment-preview-frame-study" class="assignment-preview-frame hidden"></div>
 
     <aside id="concept-nav">
       <!-- concept list injected here -->
@@ -311,6 +360,7 @@
       </div>
       <div id="concept-detail" class="hidden"></div>
     </main>
+    
   </div>
 
 
@@ -318,6 +368,7 @@
     <header id="progress-topbar">
       <button id="btn-home-progress" onclick="confirmHome()">Home</button>
       <div id="progress-course-name"></div>
+      <button id="btn-to-classes-progress" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
       <button id="btn-to-lessons-progress" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
       <!-- progress-topbar -->
       <div id="auth-control-progress" class="auth-control"></div>
@@ -341,6 +392,7 @@
     <header id="lessons-topbar">
       <button id="btn-home-lessons" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
+        <button id="btn-to-classes-lessons" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
         <button id="btn-to-progress-lessons" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <!-- lessons-topbar, inside .topnav-right -->
         <div id="auth-control-lessons" class="auth-control"></div>
@@ -361,6 +413,7 @@
       <button id="btn-home-account" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
         <!-- account-topbar, inside .topnav-right -->
+        <button id="btn-to-classes-account" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
         <button id="btn-to-progress-account" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <button id="btn-to-lessons-account" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <button id="btn-account-current" class="topnav-current" disabled>Account</button>
@@ -435,6 +488,22 @@
       </div>
     </div>
 
+    <div id="publish-modal" class="hidden">
+      <div id="publish-modal-backdrop" onclick="hidePublishModal()"></div>
+      <div id="publish-modal-dialog">
+        <p id="publish-modal-title">Publish Assignment</p>
+        <label class="auth-label" for="publish-due-date">Due date (optional)</label>
+        <input type="date" id="publish-due-date">
+        <label class="auth-label" for="publish-max-attempts">Max quiz attempts per concept (optional)</label>
+        <input type="number" id="publish-max-attempts" min="1">
+        <p id="publish-modal-error" class="auth-error"></p>
+        <div id="publish-modal-buttons">
+          <button id="btn-cancel-publish" onclick="hidePublishModal()">Cancel</button>
+          <button id="btn-confirm-publish" onclick="confirmPublishAssignment()">Publish</button>
+        </div>
+      </div>
+    </div>
+
     <div id="delete-modal" class="hidden">
       <div id="delete-modal-backdrop" onclick="cancelDeleteModal()"></div>
       <div id="delete-modal-dialog">
@@ -445,6 +514,8 @@
         </div>
       </div>
     </div>
+
+    <div id="toast" class="hidden"></div>
 
   </div>
 

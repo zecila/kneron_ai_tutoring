@@ -19,6 +19,17 @@ def get_db():
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
+def _add_column_if_missing(conn, table, column, ddl):
+     """Race-safe ALTER TABLE ADD COLUMN — tolerates concurrent gunicorn workers
+     all running init_db() at boot."""
+     try:
+         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+         conn.commit()
+         return True
+     except sqlite3.OperationalError as e:
+         if "duplicate column name" in str(e):
+             return False
+         raise
 
 def init_db():
     conn = get_db()
@@ -60,6 +71,18 @@ def init_db():
             class_id        INTEGER NOT NULL REFERENCES classes(id),
             expires_at      TEXT NOT NULL,
             created_at      TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS assignments (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_id        INTEGER NOT NULL REFERENCES classes(id),
+            lesson_id       TEXT NOT NULL REFERENCES lessons(lesson_id),
+            teacher_id      INTEGER NOT NULL REFERENCES users(id),
+            status          TEXT NOT NULL DEFAULT 'draft',  -- draft | published | archived
+            due_at          TEXT,               -- soft due date, nullable
+            max_attempts    INTEGER,            -- per-concept quiz attempt cap, nullable = unlimited
+            created_at      TEXT NOT NULL,
+            published_at    TEXT
         );
 
         CREATE TABLE IF NOT EXISTS lessons (
@@ -126,16 +149,27 @@ def init_db():
     for table in ("lesson_progress", "lessons", "quiz_attempts", "saved_items"):
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if "user_id" not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER REFERENCES users(id)")
-            conn.commit()
+            _add_column_if_missing(conn, table, "user_id", "INTEGER REFERENCES users(id)")
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(quiz_attempts)").fetchall()}
     if "question_id" not in cols:
-        conn.execute("ALTER TABLE quiz_attempts ADD COLUMN question_id TEXT REFERENCES quiz_questions(question_id)")
-        conn.commit()
+        _add_column_if_missing(conn, "quiz_attempts", "question_id", "TEXT REFERENCES quiz_questions(question_id)")
     if "explanation" not in cols:
-        conn.execute("ALTER TABLE quiz_attempts ADD COLUMN explanation TEXT")
-        conn.commit()
+        _add_column_if_missing(conn, "quiz_attempts", "explanation", "TEXT")
+    if _add_column_if_missing(conn, "quiz_attempts", "attempt_number", "INTEGER"):
+         # only backfill if this worker was the one that actually added the column
+         conn.execute(
+             """UPDATE quiz_attempts SET attempt_number = ranked.rnk
+                FROM (
+                    SELECT id, DENSE_RANK() OVER (
+                        PARTITION BY COALESCE(user_id, session_id), lesson_id, concept_id
+                        ORDER BY submitted_at
+                    ) AS rnk
+                    FROM quiz_attempts
+                ) AS ranked
+                WHERE quiz_attempts.id = ranked.id"""
+         )
+         conn.commit()
     if "question_index" in cols:
         # question_index predates question_id-based tracking and is now
         # unused/dead weight — but it's still NOT NULL, so any insert that
@@ -275,8 +309,10 @@ def get_classes_for_teacher(teacher_id, include_archived=False):
 def get_classes_for_student(student_id):
     conn = get_db()
     rows = conn.execute(
-        """SELECT classes.* FROM classes
+        """SELECT classes.*, users.first_name AS teacher_first_name, users.last_name AS teacher_last_name
+           FROM classes
            JOIN enrollments ON enrollments.class_id = classes.id
+           JOIN users ON users.id = classes.teacher_id
            WHERE enrollments.student_id = ? AND classes.archived = 0""",
         (student_id,)
     ).fetchall()
@@ -373,6 +409,121 @@ def get_enrollments_for_class(class_id):
     return [dict(r) for r in rows]
 
 
+def create_assignment(class_id, lesson_id, teacher_id):
+    conn = get_db()
+    cur = conn.execute(
+        """INSERT INTO assignments (class_id, lesson_id, teacher_id, status, created_at)
+           VALUES (?, ?, ?, 'draft', ?)""",
+        (class_id, lesson_id, teacher_id, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_assignment(assignment_id):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM assignments WHERE id = ?", (assignment_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_assignments_for_class(class_id, include_archived=False):
+    conn = get_db()
+    query = "SELECT * FROM assignments WHERE class_id = ?"
+    if not include_archived:
+        query += " AND status != 'archived'"
+    query += " ORDER BY created_at DESC"
+    rows = conn.execute(query, (class_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def is_enrolled(class_id, student_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT 1 FROM enrollments WHERE class_id = ? AND student_id = ?",
+        (class_id, student_id)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+# sorts by due date
+def get_published_assignments_for_student(class_id):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM assignments WHERE class_id = ? AND status = 'published' ORDER BY due_at IS NULL, due_at ASC",
+        (class_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_assigned_lessons_for_student(student_id):
+    """Published assignments this student is enrolled to receive, with
+    enough class context for the progress page to label them."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT a.lesson_id, a.id AS assignment_id, a.due_at,
+                  c.id AS class_id, c.name AS class_name
+           FROM assignments a
+           JOIN enrollments e ON e.class_id = a.class_id
+           JOIN classes c ON c.id = a.class_id
+           WHERE a.status = 'published' AND e.student_id = ?""",
+        (student_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_assigned_lessons_for_student_by_teacher(student_id, teacher_id):
+    """Published assignments this student can see, restricted to classes
+    owned by this teacher — used for the teacher's view into a student's
+    progress, so a teacher never sees a student's personal lessons or
+    assignments from another teacher's class."""
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT a.lesson_id, a.id AS assignment_id, a.due_at,
+                  c.id AS class_id, c.name AS class_name
+           FROM assignments a
+           JOIN enrollments e ON e.class_id = a.class_id
+           JOIN classes c ON c.id = a.class_id
+           WHERE a.status = 'published' AND e.student_id = ? AND c.teacher_id = ?""",
+        (student_id, teacher_id)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# view draft assignment
+def get_assignment_for_lesson(lesson_id):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM assignments WHERE lesson_id = ? ORDER BY created_at DESC LIMIT 1",
+        (lesson_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def publish_assignment(assignment_id, due_at=None, max_attempts=None):
+    conn = get_db()
+    conn.execute(
+        """UPDATE assignments SET status = 'published', due_at = ?, max_attempts = ?, published_at = ?
+           WHERE id = ? AND status = 'draft'""",
+        (due_at, max_attempts, datetime.now(timezone.utc).isoformat(), assignment_id)
+    )
+    conn.commit()
+
+
+def archive_assignment(assignment_id):
+    conn = get_db()
+    conn.execute("UPDATE assignments SET status = 'archived' WHERE id = ?", (assignment_id,))
+    conn.commit()
+
+
+def delete_assignment(assignment_id):
+    conn = get_db()
+    conn.execute("DELETE FROM assignments WHERE id = ? AND status = 'draft'", (assignment_id,))
+    conn.commit()
+
+
 def create_lesson_owner(lesson_id, session_id, user_id=None):
     conn = get_db()
     conn.execute(
@@ -405,13 +556,52 @@ def owns_lesson(lesson_id, user_id=None, session_id=None):
         return user_id is not None and row["user_id"] == user_id
     return row["session_id"] == session_id
 
-def delete_lesson(lesson_id):
+
+def delete_lesson(lesson_id, preserve_history=False):
     conn = get_db()
     conn.execute("DELETE FROM lessons WHERE lesson_id = ?", (lesson_id,))
-    conn.execute("DELETE FROM quiz_attempts WHERE lesson_id = ?", (lesson_id,))
-    conn.execute("DELETE FROM lesson_progress WHERE lesson_id = ?", (lesson_id,))
+    if not preserve_history:
+        conn.execute("DELETE FROM quiz_attempts WHERE lesson_id = ?", (lesson_id,))
+        conn.execute("DELETE FROM lesson_progress WHERE lesson_id = ?", (lesson_id,))
     conn.commit()
     conn.close()
+
+
+def resolve_lesson_access(lesson_id, user_id, session_id):
+    """Returns None (no access), or a dict describing how this identity may
+    access the lesson: {"role": "owner"} for the teacher who created it
+    (including personal, non-assignment lessons), or
+    {"role": "student", "assignment_id": ...} for an enrolled student on a
+    published assignment."""
+    conn = get_db()
+    lesson = conn.execute(
+        "SELECT user_id, session_id FROM lessons WHERE lesson_id = ?", (lesson_id,)
+    ).fetchone()
+    if not lesson:
+        conn.close()
+        return None
+    if lesson["user_id"] is not None:
+        if user_id is not None and lesson["user_id"] == user_id:
+            conn.close()
+            return {"role": "owner"}
+    elif lesson["session_id"] == session_id:
+        conn.close()
+        return {"role": "owner"}
+
+    if user_id is None:
+        conn.close()
+        return None
+    assignment = conn.execute(
+        """SELECT a.id, a.class_id FROM assignments a
+           JOIN enrollments e ON e.class_id = a.class_id
+           WHERE a.lesson_id = ? AND a.status = 'published' AND e.student_id = ?""",
+        (lesson_id, user_id)
+    ).fetchone()
+    conn.close()
+    if assignment:
+        return {"role": "student", "assignment_id": assignment["id"]}
+    return None
+
 
 def get_lesson_ids_for_user(user_id):
     conn = get_db()
@@ -488,19 +678,34 @@ def deactivate_batch(lesson_id, concept_id, generation_batch):
 
 def record_quiz_attempt(session_id, lesson_id, concept_id, question_id,
                          question_text, answer_given, correct_answer, is_correct,
-                         user_id=None, submitted_at=None, explanation=None):
+                         attempt_number, user_id=None, submitted_at=None, explanation=None):
     conn = get_db()
     conn.execute(
         """INSERT INTO quiz_attempts
            (session_id, user_id, lesson_id, concept_id, question_id, question_text,
-            answer_given, correct_answer, explanation, is_correct, submitted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            answer_given, correct_answer, explanation, is_correct, submitted_at, attempt_number)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, user_id, lesson_id, concept_id, question_id, question_text,
          answer_given, correct_answer, explanation, int(is_correct),
-         submitted_at or datetime.now(timezone.utc).isoformat())
+         submitted_at or datetime.now(timezone.utc).isoformat(), attempt_number)
     )
     conn.commit()
     conn.close()
+
+def get_attempt_count(user_id, session_id, lesson_id, concept_id):
+    conn = get_db()
+    if user_id:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(attempt_number), 0) AS n FROM quiz_attempts WHERE user_id = ? AND lesson_id = ? AND concept_id = ?",
+            (user_id, lesson_id, concept_id)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(attempt_number), 0) AS n FROM quiz_attempts WHERE session_id = ? AND user_id IS NULL AND lesson_id = ? AND concept_id = ?",
+            (session_id, lesson_id, concept_id)
+        ).fetchone()
+    conn.close()
+    return row["n"]
 
 
 def get_quiz_history(user_id=None, session_id=None, lesson_id=None, concept_id=None):
