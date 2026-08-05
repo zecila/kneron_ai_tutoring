@@ -1491,7 +1491,31 @@ async function loadProgressPage(studentName = null, progressUrl = "/api/progress
   const res = await fetch(progressUrl);
   const data = await res.json();
 
-  el.innerHTML = `<h1 class="lessons-page-heading">${heading}</h1>`;
+  const active = data.filter(d => !d.source.archived);
+  const archived = data.filter(d => d.source.archived);
+
+  el.innerHTML = `
+    <h1 class="lessons-page-heading">${heading}</h1>
+    <div class="progress-tabs">
+      <button class="progress-tab active" data-tab="active">Current (${active.length})</button>
+      <button class="progress-tab" data-tab="archived">Archived (${archived.length})</button>
+    </div>
+    <div id="progress-tab-active"></div>
+    <div id="progress-tab-archived" class="hidden"></div>`;
+
+  renderProgressCards(active, document.getElementById("progress-tab-active"));
+  renderProgressCards(archived, document.getElementById("progress-tab-archived"));
+
+  document.querySelectorAll(".progress-tab").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".progress-tab").forEach(b => b.classList.toggle("active", b === btn));
+      document.getElementById("progress-tab-active").classList.toggle("hidden", btn.dataset.tab !== "active");
+      document.getElementById("progress-tab-archived").classList.toggle("hidden", btn.dataset.tab !== "archived");
+    };
+  });
+}
+
+function renderProgressCards(data, el) {
   data.forEach(({ lesson, progress, quiz_history, source }) => {
     const byConceptScore = {};
     quiz_history.forEach(h => {
@@ -1550,7 +1574,7 @@ async function loadProgressPage(studentName = null, progressUrl = "/api/progress
     const toggleBtn = card.querySelector(".progress-card-toggle");
     if (toggleBtn) {
       toggleBtn.onclick = () => card.classList.toggle("collapsed");
-}
+    }
 
     // wire attempt-row clicks using the runLists we already computed above
     Object.values(byConceptScore).forEach((concept, idx) => {
@@ -1569,9 +1593,10 @@ async function loadProgressPage(studentName = null, progressUrl = "/api/progress
 }
 
 let pendingStudentProgress = null; // { studentName, progressUrl } or null, consumed once by switchScene
+let viewingStudentProgress = null;
 
 function openStudentProgress(classId, studentId, studentName) {
-  pendingStudentProgress = {
+  viewingStudentProgress = {
     studentName,
     progressUrl: `/api/classes/${classId}/students/${studentId}/progress`,
   };
@@ -3167,7 +3192,8 @@ function renderMathInCard() {
 
 // ─── Study Section  ────────────────────────────────────────────────────────────
 function goBackFromProgress() {
-  if (lastScene === "welcome") { showWelcome(); return; } //welcome isn't handled by switchScene
+  viewingStudentProgress = null;
+  if (lastScene === "welcome") { showWelcome(); return; }
   switchScene(lastScene);
 }
 
@@ -3221,10 +3247,8 @@ function switchScene(name) {
 
 
   if (name === "progress") {
-    if (pendingStudentProgress) {
-      const { studentName, progressUrl } = pendingStudentProgress;
-      pendingStudentProgress = null;
-      loadProgressPage(studentName, progressUrl);
+    if (viewingStudentProgress) {
+      loadProgressPage(viewingStudentProgress.studentName, viewingStudentProgress.progressUrl);
     } else {
       loadProgressPage();
     }

@@ -681,11 +681,16 @@ def get_slideshow(lesson_id):
         return jsonify({"error": "Lesson not found"}), 404
     try:
         with open(lesson_path(lesson_id, "slideshow.json"), "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+            data = json.load(f)
     except (FileNotFoundError, ValueError):
         return jsonify({"error": "Lesson not found or not finished generating."}), 404
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON: {str(e)}"}), 500
+
+    assignment = get_assignment_for_lesson(lesson_id)
+    if assignment and assignment.get("title"):
+        data["slideshow"]["course"] = assignment["title"]
+    return jsonify(data)
 
 @app.route("/api/lessons/<lesson_id>/curriculum")
 def get_curriculum(lesson_id):
@@ -694,11 +699,16 @@ def get_curriculum(lesson_id):
         return jsonify({"error": "Lesson not found"}), 404
     try:
         with open(lesson_path(lesson_id, "extracted_concepts.json"), "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+            data = json.load(f)
     except (FileNotFoundError, ValueError):
         return jsonify({"error": "Lesson not found or not finished generating."}), 404
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON: {str(e)}"}), 500
+
+    assignment = get_assignment_for_lesson(lesson_id)
+    if assignment and assignment.get("title"):
+        data["course"] = assignment["title"]
+    return jsonify(data)
     
 @app.route("/api/lessons/<lesson_id>/retry", methods=["POST"])
 def retry_lesson(lesson_id):
@@ -1114,8 +1124,13 @@ def all_progress():
             "lesson": meta,
             "progress": progress,
             "quiz_history": history,
-            "source": {"type": "class", "class_name": source_info["class_name"], "due_at": source_info["due_at"], "title": source_info["title"]}
-                      if source_info else {"type": "personal"},
+            "source": {
+                "type": "class",
+                "class_name": source_info["class_name"],
+                "due_at": source_info["due_at"],
+                "title": source_info["title"],
+                "archived": bool(source_info["class_archived"]) or source_info["assignment_status"] == "archived",
+            } if source_info else {"type": "personal", "archived": False},
         })
     return jsonify(result)
 
@@ -1159,7 +1174,13 @@ def student_progress_for_teacher(class_id, student_id):
             "lesson": meta,
             "progress": progress,
             "quiz_history": history,
-            "source": {"type": "class", "class_name": info["class_name"], "due_at": info["due_at"]},
+            "source": {
+                "type": "class",
+                "class_name": info["class_name"],
+                "due_at": info["due_at"],
+                "title": info["title"],
+                "archived": bool(info["class_archived"]) or info["assignment_status"] == "archived",
+            },
         })
     return jsonify(result)
 

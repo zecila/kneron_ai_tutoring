@@ -4091,6 +4091,31 @@ html, body {
   padding: 48px 24px;
 }
 
+.progress-tabs {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 16px;
+  align-self: flex-start;
+}
+.progress-tab {
+  background: none;
+  border: none;
+  padding: 0 0 6px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 200ms, border-color 200ms;
+}
+.progress-tab:hover { color: var(--accent); }
+.progress-tab.active {
+  color: var(--surface);
+  font-weight: 500;
+  border-bottom-color: var(--accent);
+}
+
 .progress-lesson-card {
   position: relative;
   width: 100%;

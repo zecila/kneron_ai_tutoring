@@ -464,11 +464,12 @@ def get_assigned_lessons_for_student(student_id):
     conn = get_db()
     rows = conn.execute(
         """SELECT a.lesson_id, a.id AS assignment_id, a.due_at, a.title,
+                  a.status AS assignment_status, c.archived AS class_archived,
                   c.id AS class_id, c.name AS class_name
            FROM assignments a
            JOIN enrollments e ON e.class_id = a.class_id
            JOIN classes c ON c.id = a.class_id
-           WHERE a.status = 'published' AND e.student_id = ?""",
+           WHERE a.status IN ('published', 'archived') AND e.student_id = ?""",
         (student_id,)
     ).fetchall()
     conn.close()
@@ -483,11 +484,12 @@ def get_assigned_lessons_for_student_by_teacher(student_id, teacher_id):
     conn = get_db()
     rows = conn.execute(
         """SELECT a.lesson_id, a.id AS assignment_id, a.due_at, a.title,
+                  a.status AS assignment_status, c.archived AS class_archived,
                   c.id AS class_id, c.name AS class_name
            FROM assignments a
            JOIN enrollments e ON e.class_id = a.class_id
            JOIN classes c ON c.id = a.class_id
-           WHERE a.status = 'published' AND e.student_id = ? AND c.teacher_id = ?""",
+           WHERE a.status IN ('published', 'archived') AND e.student_id = ? AND c.teacher_id = ?""",
         (student_id, teacher_id)
     ).fetchall()
     conn.close()
