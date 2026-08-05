@@ -1192,6 +1192,9 @@ async function retryFailedLesson() {
 
 // ─── Publish Assignment (lesson) ───────────────────────────────────────────────────────────
 function showPublishModal() {
+  document.getElementById("publish-assignment-title").value = "";
+  document.getElementById("publish-assignment-title").placeholder =
+  document.getElementById("course-name").textContent || "Uses the lesson's generated title if left blank";
   document.getElementById("publish-due-date").value = "";
   document.getElementById("publish-max-attempts").value = "";
   document.getElementById("publish-modal-error").textContent = "";
@@ -1203,6 +1206,7 @@ function hidePublishModal() {
 }
 
 async function confirmPublishAssignment() {
+  const titleRaw = document.getElementById("publish-assignment-title").value.trim();
   const dueDate = document.getElementById("publish-due-date").value;
   const dueTime = document.getElementById("publish-due-time").value || "23:59";
   const dueDateTime = dueDate ? new Date(`${dueDate}T${dueTime}`).toISOString() : null;
@@ -1214,7 +1218,7 @@ async function confirmPublishAssignment() {
     const res = await fetch(`/api/classes/${activeClassId}/assignments/${activeAssignmentId}/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ due_at: dueDateTime, max_attempts: maxAttempts }),
+      body: JSON.stringify({ due_at: dueDateTime, max_attempts: maxAttempts, title: titleRaw || null }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not publish assignment");
@@ -1253,7 +1257,7 @@ async function loadAssignmentsList(classId) {
       item.className = "lesson-library-item";
       item.disabled = meta.status !== "ready";
 
-      const fullName = meta.course || meta.source_filename || a.lesson_id;
+      const fullName = a.title || meta.course || meta.source_filename || a.lesson_id;
       const nameSpan = document.createElement("span");
       nameSpan.className = "lesson-library-name";
       const titleSpan = document.createElement("span");
@@ -1274,7 +1278,7 @@ async function loadAssignmentsList(classId) {
         editBtn.textContent = "✎";
         editBtn.onclick = (e) => {
           e.stopPropagation();
-          showEditAssignmentModal(classId, a.id, a.due_at, a.max_attempts);
+          showEditAssignmentModal(classId, a.id, a.due_at, a.max_attempts, a.title, meta.course);
         };
         item.appendChild(editBtn);
       }
@@ -1313,7 +1317,10 @@ function toLocalDatetimeValue(isoString) {
 // ─── Edit Assignment (due date / max attempts on an already-published assignment) ──────────
 let editingAssignment = null; // { classId, assignmentId }
 
-function showEditAssignmentModal(classId, assignmentId, dueAt, maxAttempts) {
+function showEditAssignmentModal(classId, assignmentId, dueAt, maxAttempts, title, generatedTitle) {
+  const titleInput = document.getElementById("edit-assignment-title");
+  titleInput.value = title || "";
+  titleInput.placeholder = generatedTitle || "Uses the lesson's generated title if left blank";
   editingAssignment = { classId, assignmentId };
   const editDate = document.getElementById("edit-assignment-due-date");
   const editTime = document.getElementById("edit-assignment-due-time");
@@ -1339,6 +1346,7 @@ function hideEditAssignmentModal() {
 async function confirmEditAssignment() {
   if (!editingAssignment) return;
   const { classId, assignmentId } = editingAssignment;
+  const titleRaw = document.getElementById("edit-assignment-title").value.trim();
   const dueDate = document.getElementById("edit-assignment-due-date").value;
   const dueTime = document.getElementById("edit-assignment-due-time").value || "23:59";
   const dueDateTime = dueDate ? new Date(`${dueDate}T${dueTime}`).toISOString() : null;
@@ -1350,7 +1358,7 @@ async function confirmEditAssignment() {
     const res = await fetch(`/api/classes/${classId}/assignments/${assignmentId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ due_at: dueDate, max_attempts: maxAttempts }),
+      body: JSON.stringify({ due_at: dueDateTime, max_attempts: maxAttempts, title: titleRaw || null }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not update assignment");
@@ -1375,7 +1383,7 @@ async function loadStudentAssignmentsList(classId) {
        item.className = "lesson-library-item";
        item.disabled = meta.status !== "ready";
  
-       const fullName = meta.course || meta.source_filename || a.lesson_id;
+       const fullName = a.title || meta.course || meta.source_filename || a.lesson_id;
        const nameSpan = document.createElement("span");
        nameSpan.className = "lesson-library-name";
        const titleSpan = document.createElement("span");
@@ -1528,7 +1536,7 @@ async function loadProgressPage(studentName = null, progressUrl = "/api/progress
 
     card.innerHTML = `
       ${showToggle ? `<button class="progress-card-toggle" aria-label="Collapse lesson">▾</button>` : ""}
-      <h3>${lesson.course || lesson.source_filename}</h3>
+      <h3>${source.title || lesson.course || lesson.source_filename}</h3>
       <div class="progress-card-meta">
         ${sourceBadge}
         ${dueLine}
@@ -3834,9 +3842,21 @@ function startQuiz(concept, questions, panel, state) {
     const header = document.createElement("div");
     header.className = "quiz-header";
 
+    const headerText = document.createElement("div");
+    headerText.className = "quiz-header-text";
+
+    const limits = quizAttemptLimits.get(conceptId);
+    if (limits && limits.maxAttempts) {
+      const attemptCounter = document.createElement("div");
+      attemptCounter.className = "quiz-attempt-counter";
+      attemptCounter.textContent = `Quiz attempt ${limits.attemptsUsed + 1} of ${limits.maxAttempts}`;
+      headerText.appendChild(attemptCounter);
+    }
+
     const counter = document.createElement("div");
     counter.className = "card-counter";
     counter.textContent = `Question ${qIndex + 1} / ${questions.length}`;
+    headerText.appendChild(counter);
 
     const jump = buildJumpDropdown(
       () => questions.map((q, i) => `Q${i + 1}: ${q.question_text.slice(0, 28)}${q.question_text.length > 28 ? "…" : ""}`),
@@ -3844,7 +3864,7 @@ function startQuiz(concept, questions, panel, state) {
       (i) => { qIndex = i; renderQ(); }
     );
 
-    header.appendChild(counter);
+    header.appendChild(headerText);
     header.appendChild(jump);
     panel.appendChild(header);
 

@@ -1270,6 +1270,7 @@ html, body {
 
 #publish-due-date,
 #publish-due-time,
+#publish-assignment-title,
 #publish-max-attempts {
   width: 100%;
   padding: 10px 14px;
@@ -1284,6 +1285,7 @@ html, body {
 
 #publish-due-date:focus,
 #publish-due-time:focus,
+#publish-assignment-title:focus,
 #publish-max-attempts:focus {
   outline: none;
   border-color: var(--accent);
@@ -1414,6 +1416,7 @@ html, body {
 
 #edit-assignment-due-date,
 #edit-assignment-due-time,
+#edit-assignment-title,
 #edit-assignment-max-attempts {
   width: 100%;
   padding: 10px 14px;
@@ -1428,6 +1431,7 @@ html, body {
 
 #edit-assignment-due-date:focus,
 #edit-assignment-due-time:focus,
+#edit-assignment-title:focus,
 #edit-assignment-max-attempts:focus {
   outline: none;
   border-color: var(--accent);
@@ -3680,6 +3684,24 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.quiz-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.quiz-header-text .card-counter {
+  text-align: left;
+  color: var(--surface);
+}
+
+.quiz-attempt-counter {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
 }
 
 .banner-btn {

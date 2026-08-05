@@ -492,6 +492,8 @@
       <div id="publish-modal-backdrop" onclick="hidePublishModal()"></div>
       <div id="publish-modal-dialog">
         <p id="publish-modal-title">Publish Assignment</p>
+        <label class="auth-label" for="publish-assignment-title">Assignment title (optional)</label>
+        <input type="text" id="publish-assignment-title" placeholder="Uses the lesson's generated title if left blank" maxlength="120">
         <label class="auth-label" for="publish-due-date">Due date (optional)</label>
         <div class="due-date-row">
           <input type="date" id="publish-due-date">
@@ -511,6 +513,8 @@
       <div id="edit-assignment-modal-backdrop" onclick="hideEditAssignmentModal()"></div>
       <div id="edit-assignment-modal-dialog">
         <p id="edit-assignment-modal-title">Edit Assignment</p>
+        <label class="auth-label" for="edit-assignment-title">Assignment title (optional)</label>
+        <input type="text" id="edit-assignment-title" placeholder="Uses the lesson's generated title if left blank" maxlength="120">
         <label class="auth-label" for="edit-assignment-due-date">Due date (optional)</label>
         <div class="due-date-row">
           <input type="date" id="edit-assignment-due-date">

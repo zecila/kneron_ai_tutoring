@@ -641,7 +641,8 @@ def publish_assignment_route(class_id, assignment_id):
         return jsonify({"error": "Assignment not found"}), 404
 
     body = request.get_json(force=True) or {}
-    publish_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"))
+    title = (body.get("title") or "").strip() or None
+    publish_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"), title=title)
     return jsonify({"ok": True})
 
 
@@ -655,7 +656,8 @@ def update_assignment_route(class_id, assignment_id):
         return jsonify({"error": "Assignment not found"}), 404
 
     body = request.get_json(force=True) or {}
-    update_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"))
+    title = (body.get("title") or "").strip() or None
+    update_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"), title=title)
     return jsonify({"ok": True})
 
 
@@ -1112,7 +1114,7 @@ def all_progress():
             "lesson": meta,
             "progress": progress,
             "quiz_history": history,
-            "source": {"type": "class", "class_name": source_info["class_name"], "due_at": source_info["due_at"]}
+            "source": {"type": "class", "class_name": source_info["class_name"], "due_at": source_info["due_at"], "title": source_info["title"]}
                       if source_info else {"type": "personal"},
         })
     return jsonify(result)

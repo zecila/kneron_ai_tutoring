@@ -79,6 +79,7 @@ def init_db():
             lesson_id       TEXT NOT NULL REFERENCES lessons(lesson_id),
             teacher_id      INTEGER NOT NULL REFERENCES users(id),
             status          TEXT NOT NULL DEFAULT 'draft',  -- draft | published | archived
+            title           TEXT,               -- teacher override; falls back to lesson's LLM-generated title, nullable
             due_at          TEXT,               -- soft due date, nullable
             max_attempts    INTEGER,            -- per-concept quiz attempt cap, nullable = unlimited
             created_at      TEXT NOT NULL,
@@ -189,6 +190,7 @@ def init_db():
     if "role" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'student' CHECK (role IN ('student','teacher'))")
         conn.commit()
+    _add_column_if_missing(conn, "assignments", "title", "TEXT")
 
     conn.close()
 
@@ -461,7 +463,7 @@ def get_assigned_lessons_for_student(student_id):
     enough class context for the progress page to label them."""
     conn = get_db()
     rows = conn.execute(
-        """SELECT a.lesson_id, a.id AS assignment_id, a.due_at,
+        """SELECT a.lesson_id, a.id AS assignment_id, a.due_at, a.title,
                   c.id AS class_id, c.name AS class_name
            FROM assignments a
            JOIN enrollments e ON e.class_id = a.class_id
@@ -480,7 +482,7 @@ def get_assigned_lessons_for_student_by_teacher(student_id, teacher_id):
     assignments from another teacher's class."""
     conn = get_db()
     rows = conn.execute(
-        """SELECT a.lesson_id, a.id AS assignment_id, a.due_at,
+        """SELECT a.lesson_id, a.id AS assignment_id, a.due_at, a.title,
                   c.id AS class_id, c.name AS class_name
            FROM assignments a
            JOIN enrollments e ON e.class_id = a.class_id
@@ -502,12 +504,12 @@ def get_assignment_for_lesson(lesson_id):
     return dict(row) if row else None
 
 
-def publish_assignment(assignment_id, due_at=None, max_attempts=None):
+def publish_assignment(assignment_id, due_at=None, max_attempts=None, title=None):
     conn = get_db()
     conn.execute(
-        """UPDATE assignments SET status = 'published', due_at = ?, max_attempts = ?, published_at = ?
+        """UPDATE assignments SET status = 'published', due_at = ?, max_attempts = ?, title = ?, published_at = ?
            WHERE id = ? AND status = 'draft'""",
-        (due_at, max_attempts, datetime.now(timezone.utc).isoformat(), assignment_id)
+        (due_at, max_attempts, title, datetime.now(timezone.utc).isoformat(), assignment_id)
     )
     conn.commit()
 
@@ -524,11 +526,11 @@ def delete_assignment(assignment_id):
     conn.commit()
 
 
-def update_assignment(assignment_id, due_at=None, max_attempts=None):
+def update_assignment(assignment_id, due_at=None, max_attempts=None, title=None):
     conn = get_db()
     conn.execute(
-        "UPDATE assignments SET due_at = ?, max_attempts = ? WHERE id = ? AND status = 'published'",
-        (due_at, max_attempts, assignment_id)
+        "UPDATE assignments SET due_at = ?, max_attempts = ?, title = ? WHERE id = ? AND status = 'published'",
+        (due_at, max_attempts, title, assignment_id)
     )
     conn.commit()
     conn.close()
