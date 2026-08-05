@@ -26,12 +26,20 @@ from lesson_paths import (
 from db import (
     init_db, record_quiz_attempt, get_quiz_history, update_lesson_progress, 
     get_lesson_progress, create_user, get_user_by_email, claim_session, 
-    create_lesson_owner, get_lessons_for_owner, owns_lesson, get_db,
-    update_user_password, owns_lesson, get_db, delete_lesson,
+    create_lesson_owner, get_lessons_for_owner, owns_lesson, resolve_lesson_access,
+    get_db, update_user_password, owns_lesson, get_db, delete_lesson,
     delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
-    get_max_batch, deactivate_batch, get_active_quiz_questions, 
+    get_attempt_count, get_max_batch, deactivate_batch, get_active_quiz_questions, 
     save_item, unsave_item, get_saved_items, update_user_name,
     create_password_reset, get_valid_reset, consume_reset_token, 
+    create_class, archive_class, get_classes_for_teacher, get_classes_for_student,
+    get_user_role, generate_join_code, get_valid_join_code_for_class, 
+    resolve_join_code, join_class, leave_class, get_enrollments_for_class,
+    create_assignment, get_assignment, get_assignments_for_class, 
+    publish_assignment, archive_assignment, delete_assignment, get_assignment_for_lesson,
+    resolve_lesson_access, is_enrolled, get_published_assignments_for_student,
+    get_assigned_lessons_for_student, get_assigned_lessons_for_student_by_teacher,
+    update_assignment
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -136,7 +144,7 @@ def login():
     session["user_id"] = user["id"]
     claim_session(session["session_id"], user["id"])  # picks up any anonymous activity from this session
 
-    return jsonify({"ok": True, "email": user["email"]})
+    return jsonify({"ok": True, "email": user["email"], "role": user["role"]})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -385,32 +393,322 @@ def _call_tool(system: str, user: str, tool: dict, max_retries: int = 2) -> dict
     raise last_err
 
 # ── Data routes ───────────────────────────────────────────────────────────────
+def require_teacher_owns_class(class_id, teacher_id):
+    """Returns the class row if it exists and belongs to this teacher, else None."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM classes WHERE id = ? AND teacher_id = ?", (class_id, teacher_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+@app.route("/api/classes", methods=["GET"])
+def list_classes():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if get_user_role(user_id) == "teacher":
+        return jsonify({"classes": get_classes_for_teacher(user_id)})
+    return jsonify({"classes": get_classes_for_student(user_id)})
+
+
+@app.route("/api/classes", methods=["POST"])
+def create_class_route():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Class name required"}), 400
+    if len(get_classes_for_teacher(user_id)) >= 10:
+        return jsonify({"error": "Class limit reached (10 max)"}), 400
+    class_id = create_class(user_id, name)
+    return jsonify({"ok": True, "class_id": class_id}), 201
+
+
+@app.route("/api/classes/<int:class_id>/archive", methods=["POST"])
+def archive_class_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    archive_class(class_id, user_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>/invite-code", methods=["POST"])
+def generate_invite_code_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    result = generate_join_code(class_id)
+    return jsonify({"ok": True, "code": result["code"], "expires_at": result["expires_at"]})
+
+
+@app.route("/api/classes/<int:class_id>/invite-code", methods=["GET"])
+def get_current_invite_code(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    row = get_valid_join_code_for_class(class_id)
+    return jsonify({"code": row["code"] if row else None, "expires_at": row["expires_at"] if row else None})
+
+
+@app.route("/api/classes/<int:class_id>/roster", methods=["GET"])
+def class_roster(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    return jsonify({"students": get_enrollments_for_class(class_id)})
+
+
+@app.route("/api/classes/<int:class_id>/students/<int:student_id>/remove", methods=["POST"])
+def remove_student_route(class_id, student_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    leave_class(class_id, student_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/join", methods=["POST"])
+def join_class_route():
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    body = request.get_json(force=True)
+    code = (body.get("code") or "").strip().upper()
+    if not code:
+        return jsonify({"error": "Invite code required"}), 400
+    resolved = resolve_join_code(code)
+    if not resolved:
+        return jsonify({"error": "Invalid or expired invite code"}), 400
+    joined = join_class(resolved["class_id"], user_id)
+    if not joined:
+        return jsonify({"ok": True, "already_joined": True})
+    return jsonify({"ok": True, "already_joined": False})
+
+
+@app.route("/api/classes/<int:class_id>/leave", methods=["POST"])
+def leave_class_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    leave_class(class_id, user_id)
+    return jsonify({"ok": True})
+
+
+def _create_assignment_lesson(class_id, teacher_id, f):
+    """Shared with create_lesson(): validates/saves the upload and enqueues
+    the pipeline job. Only the ownership row differs (assignment vs personal)."""
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in ALLOWED_EXTS:
+        return None, jsonify({"error": f"Unsupported file type: {ext}"}), 400
+
+    lesson_id = new_lesson_id()
+    _, session_id = current_identity()
+    create_lesson_owner(lesson_id, session_id=session_id, user_id=teacher_id)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    saved_path = os.path.join(UPLOAD_DIR, secure_filename(f"{lesson_id}{ext}"))
+    f.save(saved_path)
+    write_meta(lesson_id, status=Status.QUEUED, source_filename=f.filename)
+    enqueue_job(lesson_id, saved_path, f.filename)
+    return lesson_id, None, None
+
+
+@app.route("/api/classes/<int:class_id>/assignments", methods=["POST"])
+@limiter.limit("10 per hour")
+def create_assignment_route(class_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    lesson_id, err_response, code = _create_assignment_lesson(class_id, user_id, request.files["file"])
+    if err_response:
+        return err_response, code
+
+    assignment_id = create_assignment(class_id, lesson_id, user_id)
+    return jsonify({"assignment_id": assignment_id, "lesson_id": lesson_id}), 202
+
+
+@app.route("/api/classes/<int:class_id>/assignments", methods=["GET"])
+def list_assignments_route(class_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+
+    assignments = get_assignments_for_class(class_id)
+    for a in assignments:
+        try:
+            meta = read_meta(a["lesson_id"])
+            meta.update(STATUS_INFO.get(meta.get("status"), {}))
+            a["lesson"] = meta
+        except (FileNotFoundError, ValueError):
+            a["lesson"] = None
+    return jsonify(assignments)
+
+
+@app.route("/api/classes/<int:class_id>/student-assignments", methods=["GET"])
+def list_student_assignments_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id or not is_enrolled(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+
+    assignments = get_published_assignments_for_student(class_id)
+    for a in assignments:
+        try:
+            meta = read_meta(a["lesson_id"])
+            meta.update(STATUS_INFO.get(meta.get("status"), {}))
+            a["lesson"] = meta
+        except (FileNotFoundError, ValueError):
+            a["lesson"] = None
+    return jsonify(assignments)
+
+
+@app.route("/api/lessons/<lesson_id>/assignment")
+def get_lesson_assignment(lesson_id):
+    user_id, session_id = current_identity()
+    if not owns_lesson(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+    assignment = get_assignment_for_lesson(lesson_id)
+    if not assignment:
+        return jsonify({}), 200
+    return jsonify(assignment)
+
+
+@app.route("/api/classes/<int:class_id>/assignments/<int:assignment_id>", methods=["DELETE"])
+def delete_assignment_route(class_id, assignment_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    assignment = get_assignment(assignment_id)
+    if not assignment or assignment["class_id"] != class_id:
+        return jsonify({"error": "Assignment not found"}), 404
+    if assignment["status"] != "draft":
+        return jsonify({"error": "Only draft assignments can be deleted"}), 400
+
+    delete_assignment(assignment_id)
+    delete_lesson(assignment["lesson_id"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>/assignments/<int:assignment_id>/regenerate", methods=["POST"])
+@limiter.limit("10 per hour")
+def regenerate_assignment_route(class_id, assignment_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    assignment = get_assignment(assignment_id)
+    if not assignment or assignment["class_id"] != class_id or assignment["status"] != "draft":
+        return jsonify({"error": "Assignment not found"}), 404
+
+    lesson_id = assignment["lesson_id"]
+    try:
+        meta = read_meta(lesson_id)
+    except (FileNotFoundError, ValueError):
+        return jsonify({"error": "Lesson not found"}), 404
+    if meta.get("status") not in (Status.READY, Status.FAILED):
+        return jsonify({"error": "Lesson is still processing; wait for it to finish"}), 400
+
+    matches = glob.glob(os.path.join(UPLOAD_DIR, f"{lesson_id}.*"))
+    if not matches:
+        return jsonify({"error": "Original uploaded file not found; cannot regenerate"}), 404
+    file_path = matches[0]
+
+    write_meta(lesson_id, status=Status.QUEUED, error=None, failed_stage=None)
+    enqueue_job(lesson_id, file_path, meta.get("source_filename", ""), priority=0)
+    return jsonify({"status": "regenerating"}), 202
+
+
+@app.route("/api/classes/<int:class_id>/assignments/<int:assignment_id>/publish", methods=["POST"])
+def publish_assignment_route(class_id, assignment_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    assignment = get_assignment(assignment_id)
+    if not assignment or assignment["class_id"] != class_id or assignment["status"] != "draft":
+        return jsonify({"error": "Assignment not found"}), 404
+
+    body = request.get_json(force=True) or {}
+    title = (body.get("title") or "").strip() or None
+    publish_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"), title=title)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>/assignments/<int:assignment_id>", methods=["PATCH"])
+def update_assignment_route(class_id, assignment_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    assignment = get_assignment(assignment_id)
+    if not assignment or assignment["class_id"] != class_id or assignment["status"] != "published":
+        return jsonify({"error": "Assignment not found"}), 404
+
+    body = request.get_json(force=True) or {}
+    title = (body.get("title") or "").strip() or None
+    update_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"), title=title)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>/assignments/<int:assignment_id>/archive", methods=["POST"])
+def archive_assignment_route(class_id, assignment_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    assignment = get_assignment(assignment_id)
+    if not assignment or assignment["class_id"] != class_id:
+        return jsonify({"error": "Assignment not found"}), 404
+
+    archive_assignment(assignment_id)
+    return jsonify({"ok": True})
+
 
 @app.route("/api/lessons/<lesson_id>/slideshow")
 def get_slideshow(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
-        return jsonify({"error": "Lesson not found"}), 404  # 404, not 403 — don't leak existence
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
     try:
         with open(lesson_path(lesson_id, "slideshow.json"), "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+            data = json.load(f)
     except (FileNotFoundError, ValueError):
         return jsonify({"error": "Lesson not found or not finished generating."}), 404
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON: {str(e)}"}), 500
 
+    assignment = get_assignment_for_lesson(lesson_id)
+    if assignment and assignment.get("title"):
+        data["slideshow"]["course"] = assignment["title"]
+    return jsonify(data)
+
 @app.route("/api/lessons/<lesson_id>/curriculum")
 def get_curriculum(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     try:
         with open(lesson_path(lesson_id, "extracted_concepts.json"), "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+            data = json.load(f)
     except (FileNotFoundError, ValueError):
         return jsonify({"error": "Lesson not found or not finished generating."}), 404
     except json.JSONDecodeError as e:
         return jsonify({"error": f"Invalid JSON: {str(e)}"}), 500
+
+    assignment = get_assignment_for_lesson(lesson_id)
+    if assignment and assignment.get("title"):
+        data["course"] = assignment["title"]
+    return jsonify(data)
     
 @app.route("/api/lessons/<lesson_id>/retry", methods=["POST"])
 def retry_lesson(lesson_id):
@@ -463,13 +761,23 @@ def _regenerate_quiz_batch(lesson_id, concept_id):
 @app.route("/api/lessons/<lesson_id>/quiz-attempt-batch", methods=["POST"])
 def submit_quiz_batch(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    access = resolve_lesson_access(lesson_id, user_id, session_id)
+    if not access:
         return jsonify({"error": "Lesson not found"}), 404
+    is_owner_testing = access["role"] == "owner"
+
+    max_attempts = None
+    if access["role"] == "student":
+        assignment = get_assignment(access["assignment_id"])
+        max_attempts = assignment["max_attempts"] if assignment else None
+
     body = request.get_json(force=True)
     is_review = bool(body.get("review"))
 
     batch_timestamp = datetime.now(timezone.utc).isoformat()
     touched_concept_ids = set()
+    next_attempt_number = {}   # concept_id -> attempt number for this batch
+    exhausted_concept_ids = set()   # concepts skipped this batch because limit was already hit
     for a in body["attempts"]:
         question = get_quiz_question(a["question_id"])
         if question is None or question["lesson_id"] != lesson_id:
@@ -480,42 +788,57 @@ def submit_quiz_batch(lesson_id):
         is_correct = str(answer_given).strip().lower() == str(correct_answer).strip().lower()
         touched_concept_ids.add(concept_id)
 
-        if is_review:
+        if is_review or is_owner_testing:
             continue
+
+        if concept_id in exhausted_concept_ids:
+            continue
+
+        if concept_id not in next_attempt_number:
+            used = get_attempt_count(user_id, session_id, lesson_id, concept_id)
+            if max_attempts is not None and used >= max_attempts:
+                exhausted_concept_ids.add(concept_id)
+                continue
+            next_attempt_number[concept_id] = used + 1
 
         record_quiz_attempt(
             session_id=session_id, user_id=user_id, lesson_id=lesson_id, concept_id=concept_id,
             question_id=a["question_id"], question_text=question["question_text"],
             answer_given=answer_given, correct_answer=correct_answer,
             explanation=question["explanation"], is_correct=is_correct,
-            submitted_at=batch_timestamp,
+            submitted_at=batch_timestamp, attempt_number=next_attempt_number[concept_id],
         )
 
-    if not is_review:
-        for concept_id in touched_concept_ids:
-            threading.Thread(
-                target=_regenerate_quiz_batch, args=(lesson_id, concept_id), daemon=True
-            ).start()
-
-    return jsonify({"ok": True})
+    return jsonify({
+        "ok": True,
+        "touched_concept_ids": list(touched_concept_ids),
+        "exhausted_concept_ids": list(exhausted_concept_ids),
+    })
 
 
 @app.route("/api/lessons/<lesson_id>/concepts/<concept_id>/quiz")
 def get_concept_quiz(lesson_id, concept_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    access = resolve_lesson_access(lesson_id, user_id, session_id)
+    if not access:
         return jsonify({"error": "Lesson not found"}), 404
     questions = get_active_quiz_questions(lesson_id, concept_id)
-    # choices is stored as a JSON string in the DB column — decode before sending
     for q in questions:
         q["choices"] = json.loads(q["choices"]) if q["choices"] else None
-    return jsonify(questions)
+
+    max_attempts, attempts_used = None, 0
+    if access["role"] == "student":
+        assignment = get_assignment(access["assignment_id"])
+        max_attempts = assignment["max_attempts"] if assignment else None
+        attempts_used = get_attempt_count(user_id, session_id, lesson_id, concept_id)
+
+    return jsonify({"questions": questions, "max_attempts": max_attempts, "attempts_used": attempts_used})
 
 
 @app.route("/api/lessons/<lesson_id>/quiz-history")
 def quiz_history(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     concept_id = request.args.get("concept_id")
     history = get_quiz_history(user_id=user_id, session_id=session_id, lesson_id=lesson_id, concept_id=concept_id)
@@ -524,7 +847,7 @@ def quiz_history(lesson_id):
 @app.route("/api/lessons/<lesson_id>/saved-items", methods=["GET"])
 def list_saved_items(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     return jsonify(get_saved_items(session_id, lesson_id, user_id))
 
@@ -532,7 +855,7 @@ def list_saved_items(lesson_id):
 @app.route("/api/lessons/<lesson_id>/saved-items/<item_id>", methods=["POST"])
 def add_saved_item(lesson_id, item_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     body = request.get_json(force=True)
     save_item(session_id, lesson_id, item_id, body["item_type"], user_id, body.get("content"))
@@ -542,7 +865,7 @@ def add_saved_item(lesson_id, item_id):
 @app.route("/api/lessons/<lesson_id>/saved-items/<item_id>", methods=["DELETE"])
 def remove_saved_item(lesson_id, item_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     unsave_item(session_id, lesson_id, item_id)
     return jsonify({"ok": True})
@@ -552,7 +875,7 @@ def remove_saved_item(lesson_id, item_id):
 @limiter.limit("60 per hour")
 def info_definition(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     body = request.get_json(force=True)
     term                = body.get("term", "").strip()
@@ -602,7 +925,7 @@ def info_definition(lesson_id):
 @limiter.limit("60 per hour")
 def info_equation(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     body = request.get_json(force=True)
     latex      = body.get("latex", "").strip()
@@ -766,20 +1089,29 @@ start_workers(_run_pipeline, num_workers=PIPELINE_CONCURRENCY)
 @app.route("/api/progress")
 def all_progress():
     user_id, session_id = current_identity()
-    allowed_ids = set(get_lessons_for_owner(user_id, session_id))
-    lessons = [
-        read_meta(lid) for lid in sorted(os.listdir(LESSONS_DIR), reverse=True)
-        if lid in allowed_ids and os.path.isdir(os.path.join(LESSONS_DIR, lid))
-    ]
+
+    owned_ids = set(get_lessons_for_owner(user_id, session_id))
+    assigned = get_assigned_lessons_for_student(user_id) if user_id else []
+    assigned_by_lesson = {a["lesson_id"]: a for a in assigned}
+
+    all_ids = owned_ids | assigned_by_lesson.keys()
+
     result = []
-    for meta in lessons:
+    for lid in sorted(os.listdir(LESSONS_DIR), reverse=True):
+        if lid not in all_ids or not os.path.isdir(os.path.join(LESSONS_DIR, lid)):
+            continue
+        try:
+            meta = read_meta(lid)
+        except (FileNotFoundError, ValueError):
+            continue
         if meta.get("status") != "ready":
             continue
-        history = get_quiz_history(user_id=user_id, session_id=session_id, lesson_id=meta["lesson_id"])
-        progress = get_lesson_progress(user_id=user_id, session_id=session_id, lesson_id=meta["lesson_id"]) or {}
+
+        history = get_quiz_history(user_id=user_id, session_id=session_id, lesson_id=lid)
+        progress = get_lesson_progress(user_id=user_id, session_id=session_id, lesson_id=lid) or {}
 
         concept_names = {}
-        curriculum_file = lesson_path(meta["lesson_id"], "extracted_concepts.json")
+        curriculum_file = lesson_path(lid, "extracted_concepts.json")
         if os.path.exists(curriculum_file):
             with open(curriculum_file, "r", encoding="utf-8") as f:
                 curriculum = json.load(f)
@@ -787,8 +1119,71 @@ def all_progress():
         for h in history:
             h["concept_name"] = concept_names.get(h["concept_id"], h["concept_id"])
 
-        result.append({"lesson": meta, "progress": progress, "quiz_history": history})
+        source_info = assigned_by_lesson.get(lid)
+        result.append({
+            "lesson": meta,
+            "progress": progress,
+            "quiz_history": history,
+            "source": {
+                "type": "class",
+                "class_name": source_info["class_name"],
+                "due_at": source_info["due_at"],
+                "title": source_info["title"],
+                "archived": bool(source_info["class_archived"]) or source_info["assignment_status"] == "archived",
+            } if source_info else {"type": "personal", "archived": False},
+        })
     return jsonify(result)
+
+
+@app.route("/api/classes/<int:class_id>/students/<int:student_id>/progress")
+def student_progress_for_teacher(class_id, student_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    if not is_enrolled(class_id, student_id):
+        return jsonify({"error": "Student not found"}), 404
+
+    assigned = get_assigned_lessons_for_student_by_teacher(student_id, user_id)
+    assigned_by_lesson = {a["lesson_id"]: a for a in assigned}
+
+    result = []
+    for lid in sorted(os.listdir(LESSONS_DIR), reverse=True):
+        info = assigned_by_lesson.get(lid)
+        if not info or not os.path.isdir(os.path.join(LESSONS_DIR, lid)):
+            continue
+        try:
+            meta = read_meta(lid)
+        except (FileNotFoundError, ValueError):
+            continue
+        if meta.get("status") != "ready":
+            continue
+
+        history = get_quiz_history(user_id=student_id, lesson_id=lid)
+        progress = get_lesson_progress(user_id=student_id, lesson_id=lid) or {}
+
+        concept_names = {}
+        curriculum_file = lesson_path(lid, "extracted_concepts.json")
+        if os.path.exists(curriculum_file):
+            with open(curriculum_file, "r", encoding="utf-8") as f:
+                curriculum = json.load(f)
+            concept_names = {c["concept_id"]: c["name"] for c in curriculum["curriculum_graph"]["concepts"]}
+        for h in history:
+            h["concept_name"] = concept_names.get(h["concept_id"], h["concept_id"])
+
+        result.append({
+            "lesson": meta,
+            "progress": progress,
+            "quiz_history": history,
+            "source": {
+                "type": "class",
+                "class_name": info["class_name"],
+                "due_at": info["due_at"],
+                "title": info["title"],
+                "archived": bool(info["class_archived"]) or info["assignment_status"] == "archived",
+            },
+        })
+    return jsonify(result)
+
 
 @app.route("/api/lessons", methods=["POST"])
 @limiter.limit("10 per hour")
@@ -834,7 +1229,7 @@ def create_lesson():
 def lesson_status(lesson_id):
     """Frontend polls this while the pipeline runs."""
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     try:
         meta = read_meta(lesson_id)
@@ -847,7 +1242,7 @@ def lesson_status(lesson_id):
 @app.route("/api/lessons/<lesson_id>/progress", methods=["POST"])
 def update_progress(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     body = request.get_json(force=True)
     update_lesson_progress(
@@ -860,7 +1255,7 @@ def update_progress(lesson_id):
 @app.route("/api/lessons/<lesson_id>/progress")
 def get_progress(lesson_id):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     progress = get_lesson_progress(user_id=user_id, session_id=session_id, lesson_id=lesson_id)
     return jsonify(progress or {})
@@ -883,12 +1278,22 @@ def list_lessons():
                     lessons.append(json.load(f))
     return jsonify(lessons)
 
+
 @app.route("/api/lessons/<lesson_id>", methods=["DELETE"])
 def remove_lesson(lesson_id):
     user_id, session_id = current_identity()
     if not owns_lesson(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
-    delete_lesson(lesson_id)
+
+    assignment = get_assignment_for_lesson(lesson_id)
+    if assignment and assignment["status"] != "draft":
+        archive_assignment(assignment["id"])
+        delete_lesson(lesson_id, preserve_history=True)
+    else:
+        if assignment:  # draft assignment with no real submissions to preserve
+            delete_assignment(assignment["id"])
+        delete_lesson(lesson_id)
+
     lesson_folder = lesson_dir(lesson_id)
     if os.path.isdir(lesson_folder):
         import shutil
@@ -918,7 +1323,7 @@ def delete_account():
 @app.route("/api/lessons/<lesson_id>/media/<path:filename>")
 def get_lesson_media(lesson_id, filename):
     user_id, session_id = current_identity()
-    if not owns_lesson(lesson_id, user_id, session_id):
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
     try:
         base_dir = lesson_dir(lesson_id)  # raises ValueError on a malformed lesson_id

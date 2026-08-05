@@ -46,11 +46,18 @@ async function checkAuth() {
   try {
     const res = await fetch("/api/auth/me");
     const data = await res.json();
-    currentUser = data.logged_in ? { email: data.email } : null;
+    currentUser = data.logged_in ? { email: data.email, role: data.role } : null;
   } catch {
     currentUser = null;
   }
   renderAuthButton();
+  applyRoleNav();
+}
+
+function applyRoleNav() {
+  const isTeacher = currentUser?.role === "teacher";
+  document.querySelectorAll(".nav-progress-btn, .nav-lessons-btn").forEach(el => el.classList.toggle("hidden", isTeacher));
+  document.querySelectorAll(".nav-classes-btn").forEach(el => el.classList.toggle("hidden", !currentUser));
 }
 
 function renderAuthButton() {
@@ -269,8 +276,9 @@ function initAuthForm() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong");
 
-      currentUser = { email: data.email };
+      currentUser = { email: data.email, role: data.role };
       renderAuthButton();
+      applyRoleNav();
       form.reset();
       resetPasswordVisibility(document.getElementById("auth-password"), document.getElementById("auth-password-toggle"));
       loadLessonLibrary();
@@ -424,8 +432,304 @@ async function logout() {
   const pwToggle = document.getElementById("auth-password-toggle");
   if (pwInput && pwToggle) resetPasswordVisibility(pwInput, pwToggle);
   renderAuthButton();
+  applyRoleNav();
   showWelcome();
 }
+
+// ─── Classes (teacher) ─────────────────────────────────────────────────────
+let activeClassId = null;
+let activeAssignmentId = null;
+
+async function loadClassesPage() {
+  const isTeacher = currentUser?.role === "teacher";
+  document.getElementById("btn-create-class").classList.toggle("hidden", !isTeacher);
+  document.getElementById("btn-add-class").classList.toggle("hidden", isTeacher);
+
+  const res = await fetch("/api/classes");
+  const data = await res.json();
+  const list = document.getElementById("classes-list-items");
+  list.innerHTML = "";
+  (data.classes || []).forEach(c => {
+    const row = document.createElement("div");
+    row.className = "lesson-library-item";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "lesson-library-name";
+    nameSpan.textContent = c.name;
+    row.appendChild(nameSpan);
+
+    row.onclick = () => openClassDetail(c.id, c.name);
+
+    if (!isTeacher) {
+      const teacherSpan = document.createElement("span");
+      teacherSpan.className = "lesson-library-status";
+      teacherSpan.textContent = `${c.teacher_first_name} ${c.teacher_last_name}`;
+      row.appendChild(teacherSpan);
+
+      const leaveBtn = document.createElement("button");
+      leaveBtn.className = "lesson-library-delete";
+      leaveBtn.setAttribute("aria-label", "Leave class");
+      leaveBtn.textContent = "✕";
+      leaveBtn.onclick = (e) => {
+        e.stopPropagation();
+        confirmLeaveClass(c.id, c.name);
+      };
+      row.appendChild(leaveBtn);
+    }
+    list.appendChild(row);
+  });
+}
+
+function confirmLeaveClass(classId, name) {
+  pendingDeleteAction = { type: "leaveClass", classId };
+  document.getElementById("delete-modal-message").textContent = `Leaving "${name}". Are you sure?`;
+  document.getElementById("delete-modal").classList.remove("hidden");
+}
+
+document.getElementById("btn-create-class")?.addEventListener("click", () => {
+  document.getElementById("create-class-modal").classList.remove("hidden");
+});
+
+function hideCreateClassForm() {
+  document.getElementById("create-class-modal").classList.add("hidden");
+  document.getElementById("new-class-name").value = "";
+}
+
+document.getElementById("btn-submit-class")?.addEventListener("click", async () => {
+  const name = document.getElementById("new-class-name").value.trim();
+  const errorEl = document.getElementById("create-class-error");
+  errorEl.textContent = "";
+  if (!name) return;
+  const res = await fetch("/api/classes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const data = await res.json();
+  if (!res.ok) { errorEl.textContent = data.error || "Could not create class"; return; }
+  hideCreateClassForm();
+  loadClassesPage();
+});
+
+async function openClassDetail(classId, className) {
+  activeClassId = classId;
+  const isTeacher = currentUser?.role === "teacher";
+  document.getElementById("class-detail-name").textContent = className;
+  document.getElementById("class-detail-heading").textContent = className;
+  document.getElementById("btn-archive-class").classList.toggle("hidden", !isTeacher);
+  document.getElementById("btn-open-invite-modal").classList.toggle("hidden", !isTeacher);
+  document.getElementById("btn-create-assignment").classList.toggle("hidden", !isTeacher);
+  document.getElementById("btn-tab-students").classList.toggle("hidden", !isTeacher);
+  switchScene("class-detail");
+  switchClassDetailTab("assignments");
+}
+
+function switchClassDetailTab(tab) {
+  const isTeacher = currentUser?.role === "teacher";
+  document.getElementById("btn-tab-assignments").classList.toggle("tab-active", tab === "assignments");
+  document.getElementById("btn-tab-students").classList.toggle("tab-active", tab === "students");
+  document.getElementById("class-assignments").classList.toggle("hidden", tab !== "assignments");
+  document.getElementById("class-roster").classList.toggle("hidden", tab !== "students");
+  if (tab === "students") loadRoster();
+  if (tab === "assignments") {
+    isTeacher ? loadAssignmentsList(activeClassId) : loadStudentAssignmentsList(activeClassId);
+  }
+}
+
+function confirmRemoveStudent(classId, studentId, name) {
+  pendingDeleteAction = { type: "removeStudent", classId, studentId };
+  document.getElementById("delete-modal-message").textContent = `Removing ${name} from this class. Are you sure?`;
+  document.getElementById("delete-modal").classList.remove("hidden");
+}
+
+async function loadRoster() {
+  const res = await fetch(`/api/classes/${activeClassId}/roster`);
+  const data = await res.json();
+  const list = document.getElementById("roster-list");
+  list.innerHTML = "";
+  (data.students || []).forEach(s => {
+    const row = document.createElement("div");
+    row.className = "lesson-library-item";
+    row.onclick = () => openStudentProgress(activeClassId, s.id, `${s.first_name} ${s.last_name}`);
+
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "lesson-library-name";
+    nameSpan.textContent = `${s.first_name} ${s.last_name}`;
+
+    const joinedSpan = document.createElement("span");
+    joinedSpan.className = "lesson-library-status";
+    joinedSpan.textContent = `Joined ${new Date(s.joined_at).toLocaleDateString()}`;
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "lesson-library-delete";
+    deleteBtn.setAttribute("aria-label", "Remove student");
+    deleteBtn.textContent = "✕";
+    deleteBtn.onclick = (e) => {
+      e.stopPropagation(); 
+      confirmRemoveStudent(activeClassId, s.id, `${s.first_name} ${s.last_name}`);
+    };
+
+    row.append(nameSpan, joinedSpan, deleteBtn);
+    list.appendChild(row);
+  });
+}
+
+document.getElementById("btn-open-invite-modal")?.addEventListener("click", async () => {
+  document.getElementById("invite-code-modal").classList.remove("hidden");
+  const res = await fetch(`/api/classes/${activeClassId}/invite-code`);  // GET, read-only
+  const data = await res.json();
+  if (data.code) {
+    renderInviteCode(data.code, data.expires_at);
+  } else {
+    await regenerateInviteCode();  // first time — auto-generate
+  }
+});
+
+function hideInviteCodeModal() {
+  document.getElementById("invite-code-modal").classList.add("hidden");
+  clearInterval(inviteCountdownTimer);
+}
+
+document.getElementById("btn-regenerate-code")?.addEventListener("click", regenerateInviteCode);
+
+async function regenerateInviteCode() {
+  const res = await fetch(`/api/classes/${activeClassId}/invite-code`, { method: "POST" });
+  const data = await res.json();
+  renderInviteCode(data.code, data.expires_at);
+}
+
+let inviteCountdownTimer = null;
+
+function renderInviteCode(code, expiresAt) {
+  document.getElementById("invite-code-display").textContent = code;
+  clearInterval(inviteCountdownTimer);
+  updateInviteExpiryText(expiresAt);
+  inviteCountdownTimer = setInterval(() => updateInviteExpiryText(expiresAt), 1000);
+}
+
+function updateInviteExpiryText(expiresAt) {
+  const msLeft = new Date(expiresAt) - new Date();
+  const el = document.getElementById("invite-code-expiry");
+  if (msLeft <= 0) {
+    clearInterval(inviteCountdownTimer);
+    el.textContent = "Invite code expired. Generate a new one.";
+    return;
+  }
+  const mins = Math.max(1, Math.round(msLeft / 60000));
+  el.textContent = `Valid for ${mins} more minute${mins === 1 ? "" : "s"}`;
+}
+
+document.getElementById("btn-archive-class")?.addEventListener("click", () => {
+  pendingDeleteAction = { type: "archiveClass", classId: activeClassId };
+  document.getElementById("delete-modal-message").textContent =
+    "Archiving this class. Students will no longer see it, and it can't be reopened from here. Are you sure?";
+  document.getElementById("delete-modal").classList.remove("hidden");
+});
+
+document.getElementById("btn-create-assignment")?.addEventListener("click", () => {
+  document.getElementById("create-assignment-modal").classList.remove("hidden");
+});
+
+function hideCreateAssignmentForm() {
+  document.getElementById("create-assignment-modal").classList.add("hidden");
+  clearAssignmentFile();
+}
+
+function setAssignmentFile(file) {
+  const allowedExt = [".pdf", ".docx", ".pptx"];
+  const ext = "." + file.name.split(".").pop().toLowerCase();
+  if (!allowedExt.includes(ext)) {
+    alert("Please upload a PDF, DOCX, or PPTX file.");
+    return;
+  }
+  document.getElementById("assignment-file-name").textContent = file.name;
+  document.getElementById("assignment-file-status").classList.remove("hidden");
+  document.getElementById("assignment-upload-area").classList.add("has-file");
+  document.getElementById("btn-generate-assignment").disabled = false;
+}
+
+function clearAssignmentFile() {
+  document.getElementById("assignment-file-input").value = "";
+  document.getElementById("assignment-file-name").textContent = "";
+  document.getElementById("assignment-file-status").classList.add("hidden");
+  document.getElementById("assignment-upload-area").classList.remove("has-file");
+  document.getElementById("btn-generate-assignment").disabled = true;
+}
+
+function initAssignmentUpload() {
+  const input = document.getElementById("assignment-file-input");
+  const area  = document.getElementById("assignment-upload-area");
+  area.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => { if (input.files[0]) setAssignmentFile(input.files[0]); });
+  area.addEventListener("dragover", e => { e.preventDefault(); area.classList.add("drag-over"); });
+  area.addEventListener("dragleave", () => area.classList.remove("drag-over"));
+  area.addEventListener("drop", e => {
+    e.preventDefault();
+    area.classList.remove("drag-over");
+    const file = e.dataTransfer.files[0];
+    if (file) setAssignmentFile(file);
+  });
+}
+
+async function generateAssignment() {
+  document.getElementById("create-assignment-modal").classList.add("hidden");
+  document.getElementById("class-detail-screen").classList.add("hidden");
+  showScreen("loading");
+
+  try {
+    const file = document.getElementById("assignment-file-input").files[0];
+    const form = new FormData();
+    form.append("file", file);
+    clearAssignmentFile();
+
+    const uploadRes = await fetch(`/api/classes/${activeClassId}/assignments`, { method: "POST", body: form });
+    const data = await uploadRes.json();
+    if (!uploadRes.ok) throw new Error(data.error || "Upload failed");
+
+    lessonId = data.lesson_id;
+    activeAssignmentId = data.assignment_id;
+    history.replaceState(null, "", `?lesson=${lessonId}`);
+
+    await pollLessonStatus(lessonId);
+    await loadSlideshow(true);
+  } catch (err) {
+    document.getElementById("error-message").textContent = err.message;
+    document.querySelector(".error-code").textContent = err.message.match(/\d{3}/)?.[0] || "!";
+    showScreen("error");
+  }
+}
+
+// CLASSES: STUDENT
+document.getElementById("btn-add-class")?.addEventListener("click", () => {
+  document.getElementById("join-class-modal").classList.remove("hidden");
+});
+
+function hideJoinClassForm() {
+  document.getElementById("join-class-modal").classList.add("hidden");
+  document.getElementById("join-class-code").value = "";
+  document.getElementById("join-class-error").textContent = "";
+}
+
+document.getElementById("btn-submit-join-class")?.addEventListener("click", async () => {
+  const code = document.getElementById("join-class-code").value.trim().toUpperCase();
+  const errorEl = document.getElementById("join-class-error");
+  errorEl.textContent = "";
+  if (!code) return;
+
+  try {
+    const res = await fetch("/api/classes/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Invalid or expired code");
+    hideJoinClassForm();
+    loadClassesPage();
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
+});
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
@@ -436,6 +740,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
   document.addEventListener("keydown", handleKeyboard);
   initUpload();
+  initAssignmentUpload();
   checkAuth();
   checkForResetToken();
   initAuthForm();
@@ -443,19 +748,43 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function enterLesson(id) {
   lessonId = id;
-  const scene = new URLSearchParams(window.location.search).get("scene"); // read before URL gets overwritten
-  history.replaceState(null, "", scene ? `?lesson=${id}&scene=${scene}` : `?lesson=${id}`); // preserve it
+  document.getElementById("class-detail-screen").classList.add("hidden");
+  const scene = new URLSearchParams(window.location.search).get("scene");
+  history.replaceState(null, "", scene ? `?lesson=${id}&scene=${scene}` : `?lesson=${id}`);
   showScreen("loading");
   pollLessonStatus(id)
-    .then(() => loadSlideshow(false))   // resuming, not a fresh finish
+    .then(() => fetchAssignmentContext(id))
+    .then(() => loadSlideshow(false))
     .then(() => {
-      if (scene === "study") switchScene("study"); // use the captured value, not a fresh (now-empty) lookup
+      if (scene === "study") switchScene("study");
     })
     .catch(err => {
       document.getElementById("error-message").textContent = err.message;
       document.querySelector(".error-code").textContent = err.message.match(/\d{3}/)?.[0] || "!";
       showScreen("error");
     });
+}
+
+async function fetchAssignmentContext(id) {
+  try {
+    const res = await fetch(`/api/lessons/${id}/assignment`);
+    if (!res.ok) { activeAssignmentId = null; return; }
+    const data = await res.json();
+    if (data.id && data.status === "draft") {
+      activeAssignmentId = data.id;
+      activeClassId = data.class_id;
+    } else {
+      activeAssignmentId = null;
+    }
+  } catch {
+    activeAssignmentId = null;
+  }
+}
+
+function updateAssignmentPreviewUI() {
+  document.querySelectorAll(".assignment-preview-banner, .assignment-preview-frame").forEach(el => {
+    el.classList.toggle("hidden", !activeAssignmentId);
+  });
 }
 
 async function loadSlideshow(justGenerated = false) {
@@ -538,12 +867,14 @@ async function loadSlideshow(justGenerated = false) {
       renderSlide(startSlide);       // autoplay fires here now, only after a real click
       showScreen("slideshow");
       lastScene = "slideshow";
+      updateAssignmentPreviewUI();
       fitSlideToStage();
       window.addEventListener("resize", fitSlideToStage);
     };
 
     if (justGenerated && scene !== "study") {
       document.getElementById("start-lesson-title").textContent = data.slideshow.course;
+      document.getElementById("lesson-start-btn").textContent = activeAssignmentId ? "Preview Lesson" : "Start Lesson";
       showScreen("start");
       document.getElementById("lesson-start-btn").onclick = enterSlideshow;
     } else {
@@ -690,6 +1021,45 @@ async function confirmDeleteModal() {
     } catch (err) {
       console.warn("Could not delete account:", err.message);
     }
+  } else if (action.type === "removeStudent") {
+    try {
+      const res = await fetch(`/api/classes/${action.classId}/students/${action.studentId}/remove`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      loadRoster();
+    } catch (err) {
+      console.warn("Could not remove student:", err.message);
+    }
+  } else if (action.type === "archiveClass") {
+    try {
+      const res = await fetch(`/api/classes/${action.classId}/archive`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      switchScene("classes");
+      loadClassesPage();
+    } catch (err) {
+      console.warn("Could not archive class:", err.message);
+    }
+  } else if (action.type === "leaveClass") {
+    try {
+      const res = await fetch(`/api/classes/${action.classId}/leave`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      loadClassesPage();
+    } catch (err) {
+      console.warn("Could not leave class:", err.message);
+    }
+  } else if (action.type === "discardAssignment") {
+    try {
+      const endpoint = action.status === "draft"
+        ? `/api/classes/${action.classId}/assignments/${action.assignmentId}`
+        : `/api/classes/${action.classId}/assignments/${action.assignmentId}/archive`;
+      const method = action.status === "draft" ? "DELETE" : "POST";
+      const res = await fetch(endpoint, { method });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      activeAssignmentId = null;
+      if (lessonId) { lessonId = null; }
+      openClassDetail(action.classId);
+    } catch (err) {
+      console.warn("Could not remove assignment:", err.message);
+    }
   }
 }
 
@@ -820,10 +1190,260 @@ async function retryFailedLesson() {
   }
 }
 
+// ─── Publish Assignment (lesson) ───────────────────────────────────────────────────────────
+function showPublishModal() {
+  document.getElementById("publish-assignment-title").value = "";
+  document.getElementById("publish-assignment-title").placeholder =
+  document.getElementById("course-name").textContent || "Uses the lesson's generated title if left blank";
+  document.getElementById("publish-due-date").value = "";
+  document.getElementById("publish-max-attempts").value = "";
+  document.getElementById("publish-modal-error").textContent = "";
+  document.getElementById("publish-modal").classList.remove("hidden");
+}
+
+function hidePublishModal() {
+  document.getElementById("publish-modal").classList.add("hidden");
+}
+
+async function confirmPublishAssignment() {
+  const titleRaw = document.getElementById("publish-assignment-title").value.trim();
+  const dueDate = document.getElementById("publish-due-date").value;
+  const dueTime = document.getElementById("publish-due-time").value || "23:59";
+  const dueDateTime = dueDate ? new Date(`${dueDate}T${dueTime}`).toISOString() : null;
+  const maxAttemptsRaw = document.getElementById("publish-max-attempts").value;
+  const maxAttempts = maxAttemptsRaw ? parseInt(maxAttemptsRaw, 10) : null;
+  const errorEl = document.getElementById("publish-modal-error");
+
+  try {
+    const res = await fetch(`/api/classes/${activeClassId}/assignments/${activeAssignmentId}/publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ due_at: dueDateTime, max_attempts: maxAttempts, title: titleRaw || null }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not publish assignment");
+    hidePublishModal();
+    activeAssignmentId = null;
+    openClassDetail(activeClassId, document.getElementById("class-detail-name").textContent); // back to the class, where it now shows as published
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
+}
+
+function confirmDiscardAssignment(classId = activeClassId, assignmentId = activeAssignmentId, status = "draft") {
+  pendingDeleteAction = { type: "discardAssignment", classId, assignmentId, status };
+  document.getElementById("delete-modal-message").textContent =
+    status === "draft"
+      ? "Discarding this draft lesson. This can't be undone. Are you sure?"
+      : "Archiving this lesson. Students will no longer be able to access it. Are you sure?";
+  document.getElementById("delete-modal").classList.remove("hidden");
+}
+
+function saveAssignmentAsDraft() {
+  showToast("Saved");
+}
+
+async function loadAssignmentsList(classId) {
+  const list = document.getElementById("assignments-list");
+  try {
+    const res = await fetch(`/api/classes/${classId}/assignments`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const assignments = await res.json();
+
+    list.innerHTML = "";
+    assignments.forEach(a => {
+      const meta = a.lesson || {};
+      const item = document.createElement("button");
+      item.className = "lesson-library-item";
+      item.disabled = meta.status !== "ready";
+
+      const fullName = a.title || meta.course || meta.source_filename || a.lesson_id;
+      const nameSpan = document.createElement("span");
+      nameSpan.className = "lesson-library-name";
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "lesson-library-title";
+      titleSpan.textContent = fullName;
+      nameSpan.appendChild(titleSpan);
+
+      const statusSpan = document.createElement("span");
+      statusSpan.className = `lesson-library-status lesson-status-${a.status}`;
+      statusSpan.textContent = a.status === "draft" ? "Draft" : a.status === "published" ? "Published" : "Archived";
+
+      item.append(nameSpan, statusSpan);
+
+      if (a.status === "published") {
+        const editBtn = document.createElement("button");
+        editBtn.className = "lesson-library-edit";
+        editBtn.setAttribute("aria-label", "Edit assignment");
+        editBtn.textContent = "✎";
+        editBtn.onclick = (e) => {
+          e.stopPropagation();
+          showEditAssignmentModal(classId, a.id, a.due_at, a.max_attempts, a.title, meta.course);
+        };
+        item.appendChild(editBtn);
+      }
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.className = "lesson-library-delete";
+      deleteBtn.setAttribute("aria-label", a.status === "draft" ? "Discard assignment" : "Archive assignment");
+      deleteBtn.textContent = "✕";
+      item.appendChild(deleteBtn);
+
+      item.onclick = () => {
+        activeClassId = classId;
+        activeAssignmentId = a.status === "draft" ? a.id : null;
+        enterLesson(a.lesson_id);
+      };
+      item.querySelector(".lesson-library-delete").onclick = (e) => {
+        e.stopPropagation();
+        confirmDiscardAssignment(classId, a.id, a.status);
+      };
+      list.appendChild(item);
+    });
+
+    document.getElementById("assignments-empty")?.classList.toggle("hidden", assignments.length > 0);
+  } catch (err) {
+    console.warn("Could not load assignments:", err.message);
+  }
+}
+
+// converts a stored ISO due_at into the "YYYY-MM-DDTHH:MM" format datetime-local inputs expect, in the *local* tz
+function toLocalDatetimeValue(isoString) {
+  const d = new Date(isoString);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ─── Edit Assignment (due date / max attempts on an already-published assignment) ──────────
+let editingAssignment = null; // { classId, assignmentId }
+
+function showEditAssignmentModal(classId, assignmentId, dueAt, maxAttempts, title, generatedTitle) {
+  const titleInput = document.getElementById("edit-assignment-title");
+  titleInput.value = title || "";
+  titleInput.placeholder = generatedTitle || "Uses the lesson's generated title if left blank";
+  editingAssignment = { classId, assignmentId };
+  const editDate = document.getElementById("edit-assignment-due-date");
+  const editTime = document.getElementById("edit-assignment-due-time");
+  if (dueAt) {
+    const d = new Date(dueAt);
+    const pad = n => String(n).padStart(2, "0");
+    editDate.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    editTime.value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } else {
+    editDate.value = "";
+    editTime.value = "23:59";
+  }
+  document.getElementById("edit-assignment-max-attempts").value = maxAttempts ?? "";
+  document.getElementById("edit-assignment-modal-error").textContent = "";
+  document.getElementById("edit-assignment-modal").classList.remove("hidden");
+}
+
+function hideEditAssignmentModal() {
+  document.getElementById("edit-assignment-modal").classList.add("hidden");
+  editingAssignment = null;
+}
+
+async function confirmEditAssignment() {
+  if (!editingAssignment) return;
+  const { classId, assignmentId } = editingAssignment;
+  const titleRaw = document.getElementById("edit-assignment-title").value.trim();
+  const dueDate = document.getElementById("edit-assignment-due-date").value;
+  const dueTime = document.getElementById("edit-assignment-due-time").value || "23:59";
+  const dueDateTime = dueDate ? new Date(`${dueDate}T${dueTime}`).toISOString() : null;
+  const maxAttemptsRaw = document.getElementById("edit-assignment-max-attempts").value;
+  const maxAttempts = maxAttemptsRaw ? parseInt(maxAttemptsRaw, 10) : null;
+  const errorEl = document.getElementById("edit-assignment-modal-error");
+
+  try {
+    const res = await fetch(`/api/classes/${classId}/assignments/${assignmentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ due_at: dueDateTime, max_attempts: maxAttempts, title: titleRaw || null }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not update assignment");
+    hideEditAssignmentModal();
+    loadAssignmentsList(classId);
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
+}
+
+async function loadStudentAssignmentsList(classId) {
+  const list = document.getElementById("assignments-list");
+  try {
+    const res = await fetch(`/api/classes/${classId}/student-assignments`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const assignments = await res.json();
+ 
+     list.innerHTML = "";
+     assignments.forEach(a => {
+       const meta = a.lesson || {};
+       const item = document.createElement("button");
+       item.className = "lesson-library-item";
+       item.disabled = meta.status !== "ready";
+ 
+       const fullName = a.title || meta.course || meta.source_filename || a.lesson_id;
+       const nameSpan = document.createElement("span");
+       nameSpan.className = "lesson-library-name";
+       const titleSpan = document.createElement("span");
+       titleSpan.className = "lesson-library-title";
+       titleSpan.textContent = fullName;
+       nameSpan.appendChild(titleSpan);
+ 
+       const dueSpan = document.createElement("span");
+       dueSpan.className = "lesson-library-status";
+       // line ~1367
+       dueSpan.textContent = a.due_at ? `Due ${new Date(a.due_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}` : "No due date";
+ 
+       item.append(nameSpan, dueSpan);
+       item.onclick = () => {
+         activeClassId = classId;
+         activeAssignmentId = null;
+         enterLesson(a.lesson_id);
+       };
+       list.appendChild(item);
+     });
+ 
+     document.getElementById("assignments-empty")?.classList.toggle("hidden", assignments.length > 0);
+   } catch (err) {
+     console.warn("Could not load student assignments:", err.message);
+   }
+ }
+
+let toastTimer = null;
+function showToast(message) {
+  const el = document.getElementById("toast");
+  el.textContent = message;
+  el.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add("hidden"), 1800);
+}
+
+function saveAssignmentAsDraft() {
+  showToast("Saved");
+}
+
+function goToAssignments() {
+  openClassDetail(activeClassId, document.getElementById("class-detail-name").textContent);
+}
+
+function updateAssignmentPreviewUI() {
+  document.querySelectorAll(".assignment-preview-banner, .assignment-preview-frame").forEach(el => {
+    el.classList.toggle("hidden", !activeAssignmentId);
+  });
+
+  const isTeacher = currentUser?.role === "teacher";
+  document.querySelectorAll(".nav-assignments-btn").forEach(el => {
+    el.classList.toggle("hidden", !(isTeacher && activeClassId));
+  });
+}
+
 // ─── Back to Home ───────────────────────────────────────────────────────────
 
 function confirmHome() {
-  if (!lessonId) { doGoHome(); return; }
+  const isTeacher = currentUser?.role === "teacher";
+  if (!lessonId || isTeacher) { doGoHome(); return; }
   document.getElementById("home-modal").classList.remove("hidden");
 }
 
@@ -835,6 +1455,13 @@ function doGoHome() {
   document.getElementById("home-modal").classList.add("hidden");
   stopNarrationFully();
   lessonId = null;
+  if (activeAssignmentId) {
+    const classId = activeClassId;
+    activeAssignmentId = null;
+    history.replaceState(null, "", window.location.pathname);
+    openClassDetail(classId);
+    return;
+  }
   history.replaceState(null, "", window.location.pathname);
   showWelcome();
 }
@@ -857,14 +1484,39 @@ function renderAttemptDetail(conceptName, attempts) {
   renderQuizResults({ concept_id: null }, panel, fakeState, fakeQuestions, true);
 }
 
-async function loadProgressPage() {
+async function loadProgressPage(studentName = null, progressUrl = "/api/progress") {
   const el = document.getElementById("progress-content");
-  el.innerHTML = `<h1 class="lessons-page-heading">My Progress</h1>` + "<p>Loading…</p>";
-  const res = await fetch("/api/progress");
+  const heading = studentName ? `${studentName}'s Progress` : "My Progress";
+  el.innerHTML = `<h1 class="lessons-page-heading">${heading}</h1>` + "<p>Loading…</p>";
+  const res = await fetch(progressUrl);
   const data = await res.json();
 
-  el.innerHTML = `<h1 class="lessons-page-heading">My Progress</h1>`;
-  data.forEach(({ lesson, progress, quiz_history }) => {
+  const active = data.filter(d => !d.source.archived);
+  const archived = data.filter(d => d.source.archived);
+
+  el.innerHTML = `
+    <h1 class="lessons-page-heading">${heading}</h1>
+    <div class="progress-tabs">
+      <button class="progress-tab active" data-tab="active">Current (${active.length})</button>
+      <button class="progress-tab" data-tab="archived">Archived (${archived.length})</button>
+    </div>
+    <div id="progress-tab-active"></div>
+    <div id="progress-tab-archived" class="hidden"></div>`;
+
+  renderProgressCards(active, document.getElementById("progress-tab-active"));
+  renderProgressCards(archived, document.getElementById("progress-tab-archived"));
+
+  document.querySelectorAll(".progress-tab").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".progress-tab").forEach(b => b.classList.toggle("active", b === btn));
+      document.getElementById("progress-tab-active").classList.toggle("hidden", btn.dataset.tab !== "active");
+      document.getElementById("progress-tab-archived").classList.toggle("hidden", btn.dataset.tab !== "archived");
+    };
+  });
+}
+
+function renderProgressCards(data, el) {
+  data.forEach(({ lesson, progress, quiz_history, source }) => {
     const byConceptScore = {};
     quiz_history.forEach(h => {
       byConceptScore[h.concept_id] ??= { name: h.concept_name, conceptId: h.concept_id, attempts: [] };
@@ -898,9 +1550,21 @@ async function loadProgressPage() {
     // render each concept once, keep its runList around for click wiring below
     const conceptRenders = Object.values(byConceptScore).map(renderConceptProgress);
 
+    const sourceBadge = source.type === "class"
+      ? `<span class="progress-source-badge progress-source-class">${source.class_name}</span>`
+      : `<span class="progress-source-badge progress-source-personal">Personal</span>`;
+
+    const dueLine = source.type === "class" && source.due_at
+      ? `<span class="progress-due-date">Due ${new Date(source.due_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>`
+      : "";
+
     card.innerHTML = `
       ${showToggle ? `<button class="progress-card-toggle" aria-label="Collapse lesson">▾</button>` : ""}
-      <h3>${lesson.course || lesson.source_filename}</h3>
+      <h3>${source.title || lesson.course || lesson.source_filename}</h3>
+      <div class="progress-card-meta">
+        ${sourceBadge}
+        ${dueLine}
+      </div>
       <p class="progress-slides">${progress.completed ? "Completed" : pct}</p>
       <p class="progress-avg-score">${avgScore}</p>
       <div class="progress-card-body">
@@ -926,6 +1590,17 @@ async function loadProgressPage() {
 
     el.appendChild(card);
   });
+}
+
+let pendingStudentProgress = null; // { studentName, progressUrl } or null, consumed once by switchScene
+let viewingStudentProgress = null;
+
+function openStudentProgress(classId, studentId, studentName) {
+  viewingStudentProgress = {
+    studentName,
+    progressUrl: `/api/classes/${classId}/students/${studentId}/progress`,
+  };
+  switchScene("progress");
 }
 
 function renderConceptProgress(concept) {
@@ -2517,7 +3192,8 @@ function renderMathInCard() {
 
 // ─── Study Section  ────────────────────────────────────────────────────────────
 function goBackFromProgress() {
-  if (lastScene === "welcome") { showWelcome(); return; } //welcome isn't handled by switchScene
+  viewingStudentProgress = null;
+  if (lastScene === "welcome") { showWelcome(); return; }
   switchScene(lastScene);
 }
 
@@ -2544,22 +3220,13 @@ function switchScene(name) {
       btn.textContent = "▶";
       btn.classList.remove("tts-btn-active");
     }
-  } else if (name === "progress" || name === "lessons") {
-    // Just a detour, not leaving the lesson. pause only, so coming back
-    // resumes narration instead of restarting the slide's notes
-    if (currentAudio) {
-      currentAudio.pause();
-      audioPaused = true;
-    }
-    if (autoPlayTimer) {
-      clearTimeout(autoPlayTimer);
-      autoPlayTimer = null;
-    }
-    ttsRequestId++;
+
   } else if (name === "progress" || name === "lessons" || name === "attempt-detail") {
     if (currentAudio) { currentAudio.pause(); audioPaused = true; }
     if (autoPlayTimer) { clearTimeout(autoPlayTimer); autoPlayTimer = null; }
     ttsRequestId++;
+  } else if (name === "classes"){
+    if (currentAudio) { currentAudio.pause(); audioPaused = true; }
   } else {
     // Leaving the lesson context entirely (Account, Auth, etc.)
     // wipe narration instead of just pausing it
@@ -2568,29 +3235,34 @@ function switchScene(name) {
   
   document.getElementById("slideshow").classList.toggle("hidden", name !== "slideshow");
   document.getElementById("study").classList.toggle("hidden", name !== "study");
+  if (name === "slideshow" || name === "study") updateAssignmentPreviewUI();
   document.getElementById("progress-screen").classList.toggle("hidden", name !== "progress");
   document.getElementById("attempt-detail-screen").classList.toggle("hidden", name !== "attempt-detail");  
   document.getElementById("welcome-screen").classList.toggle("hidden", name !== "welcome");
   document.getElementById("auth-screen")?.classList.toggle("hidden", name !== "auth");
+  document.getElementById("classes-screen")?.classList.toggle("hidden", name !== "classes");
+  document.getElementById("class-detail-screen")?.classList.toggle("hidden", name !== "class-detail");
   document.getElementById("lessons-screen").classList.toggle("hidden", name !== "lessons");
   document.getElementById("account-screen").classList.toggle("hidden", name !== "account");
 
 
   if (name === "progress") {
-    loadProgressPage();
-    const backBtn = document.getElementById("btn-to-slides-progress"); // sync label to target scene
+    if (viewingStudentProgress) {
+      loadProgressPage(viewingStudentProgress.studentName, viewingStudentProgress.progressUrl);
+    } else {
+      loadProgressPage();
+    }
+    const backBtn = document.getElementById("btn-to-slides-progress");
     if (backBtn) {
       backBtn.textContent = "Back";
     }
   }
 
-  if (name === "lessons") {
-    loadLessonLibrary();
-  }
+  if (name === "classes") loadClassesPage();
 
-  if (name === "account") {
-    loadAccountPage();
-  }
+  if (name === "lessons") loadLessonLibrary();
+
+  if (name === "account") loadAccountPage();
 
   if (name === "study" && curriculum) {
     // build "All Concepts" as index 0, then real concepts
@@ -2978,6 +3650,7 @@ function buildAllConcept() {
 
 // ─── Quiz question cache: avoid re-fetching every time the panel re-renders ──
 const quizQuestionsCache = new Map(); // concept_id -> questions array
+const quizAttemptLimits = new Map();  // concept_id -> { max_attempts, attempts_used }
 
 async function fetchQuizQuestions(conceptId) {
   if (conceptId === "__saved__") {
@@ -2992,7 +3665,9 @@ async function fetchQuizQuestions(conceptId) {
     questions = perConcept.flat();
   } else {
     const res = await fetch(`/api/lessons/${lessonId}/concepts/${conceptId}/quiz`);
-    questions = await res.json();
+    const data = await res.json();
+    questions = data.questions;
+    quizAttemptLimits.set(conceptId, { maxAttempts: data.max_attempts, attemptsUsed: data.attempts_used });
   }
   quizQuestionsCache.set(conceptId, questions);
   return questions;
@@ -3191,9 +3866,21 @@ function startQuiz(concept, questions, panel, state) {
     const header = document.createElement("div");
     header.className = "quiz-header";
 
+    const headerText = document.createElement("div");
+    headerText.className = "quiz-header-text";
+
+    const limits = quizAttemptLimits.get(conceptId);
+    if (limits && limits.maxAttempts) {
+      const attemptCounter = document.createElement("div");
+      attemptCounter.className = "quiz-attempt-counter";
+      attemptCounter.textContent = `Quiz attempt ${limits.attemptsUsed + 1} of ${limits.maxAttempts}`;
+      headerText.appendChild(attemptCounter);
+    }
+
     const counter = document.createElement("div");
     counter.className = "card-counter";
     counter.textContent = `Question ${qIndex + 1} / ${questions.length}`;
+    headerText.appendChild(counter);
 
     const jump = buildJumpDropdown(
       () => questions.map((q, i) => `Q${i + 1}: ${q.question_text.slice(0, 28)}${q.question_text.length > 28 ? "…" : ""}`),
@@ -3201,7 +3888,7 @@ function startQuiz(concept, questions, panel, state) {
       (i) => { qIndex = i; renderQ(); }
     );
 
-    header.appendChild(counter);
+    header.appendChild(headerText);
     header.appendChild(jump);
     panel.appendChild(header);
 
@@ -3539,9 +4226,23 @@ function renderQuizResults(concept, panel, state, questions, readOnly = false) {
   panel.appendChild(breakdown);
 
   if (!readOnly) {
+    const limits = concept.concept_id ? quizAttemptLimits.get(concept.concept_id) : null;
+    const attemptsUsedNow = limits?.maxAttempts != null ? limits.attemptsUsed + 1 : null;
+    const outOfAttempts = attemptsUsedNow !== null && attemptsUsedNow >= limits.maxAttempts;
+
+    if (limits?.maxAttempts != null) {
+      const remaining = document.createElement("div");
+      remaining.className = "quiz-attempts-remaining";
+      remaining.textContent = outOfAttempts
+        ? "No attempts remaining"
+        : `${limits.maxAttempts - attemptsUsedNow} attempt${limits.maxAttempts - attemptsUsedNow === 1 ? "" : "s"} remaining`;
+      panel.appendChild(remaining);
+    }
+
     const retryBtn = document.createElement("button");
     retryBtn.className = "card-btn";
     retryBtn.textContent = "Retry Quiz";
+    retryBtn.disabled = outOfAttempts;
     retryBtn.onclick = () => {
       resetQuizState(concept.concept_id);
       renderStudyPanel(concept, "quiz", panel);

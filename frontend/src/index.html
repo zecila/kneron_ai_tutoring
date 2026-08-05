@@ -20,8 +20,9 @@
     <!-- Welcome / Home screen -->
     <div id="welcome-screen">
       <div class="topnav-right">
-        <button id="btn-to-progress-welcome" onclick="switchScene('progress')">Progress</button>
-        <button id="btn-to-lessons-welcome" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-classes-welcome" onclick="switchScene('classes')" class="nav-classes-btn hidden">Classes</button>
+        <button id="btn-to-progress-welcome" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-welcome" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <div id="auth-control-welcome" class="auth-control"></div>
       </div>
       <div class="welcome-inner">
@@ -65,6 +66,127 @@
       </div>
     </div>
 
+    <div id="classes-screen" class="hidden">
+    <header id="classes-topbar">
+      <button id="btn-home-classes" onclick="confirmHome()">Home</button>
+      <div class="topnav-right">
+        <button id="btn-to-progress-classes" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-classes" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+        <div id="auth-control-classes" class="auth-control"></div>
+        <button id="btn-back-classes" onclick="showWelcome()">Back</button>
+      </div>
+    </header>
+    <main id="classes-content">
+      <div class="section-header-row">
+        <h1 class="lessons-page-heading">Classes</h1>
+        <button id="btn-create-class" class="btn-small">+ Create Class</button>
+        <button id="btn-add-class" class="btn-small hidden">+ Add Class</button>
+      </div>
+      <div id="create-class-modal" class="hidden">
+        <div id="create-class-modal-backdrop" onclick="hideCreateClassForm()"></div>
+        <div id="create-class-modal-dialog">
+          <p id="create-class-modal-title">Create Class</p>
+          <label class="auth-label" for="new-class-name">Class name</label>
+          <input type="text" id="new-class-name">
+          <p id="create-class-error" class="auth-error"></p>
+          <div id="create-class-modal-buttons">
+            <button id="btn-cancel-class" onclick="hideCreateClassForm()">Cancel</button>
+            <button id="btn-submit-class">Create</button>
+          </div>
+        </div>
+      </div>
+      <div id="join-class-modal" class="hidden">
+        <div id="join-class-modal-backdrop" onclick="hideJoinClassForm()"></div>
+        <div id="join-class-modal-dialog">
+          <p id="join-class-modal-title">Add a Class</p>
+          <label class="auth-label" for="join-class-code">Invite code</label>
+          <input type="text" id="join-class-code" autocomplete="off">
+          <p id="join-class-error" class="auth-error"></p>
+          <div id="join-class-modal-buttons">
+            <button id="btn-cancel-join-class" onclick="hideJoinClassForm()">Cancel</button>
+            <button id="btn-submit-join-class">Join</button>
+          </div>
+        </div>
+      </div>
+      <div id="classes-list" class="lesson-library-card">
+        <p class="lesson-library-heading">Your Classes</p>
+        <div id="classes-list-items"></div>
+      </div>
+    </main>
+  </div>
+
+  <div id="class-detail-screen" class="hidden">
+    <header id="class-detail-topbar">
+      <button id="btn-home-class-detail" onclick="confirmHome()">Home</button>
+      <div id="class-detail-name"></div>
+      <div class="topnav-right">
+        <button id="btn-to-classes-class-detail" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+        <button id="btn-to-lessons-class-detail" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-progress-class-detail" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <div id="auth-control-class-detail" class="auth-control"></div>
+        <button id="btn-back-class-detail" onclick="switchScene('classes')">Back</button>
+      </div>
+    </header>
+    <main id="class-detail-content">
+      <div id="class-detail-heading-row">
+        <h1 id="class-detail-heading" class="lessons-page-heading"></h1>
+        <button id="btn-archive-class" class="btn-secondary">Archive Class</button>
+      </div>
+      <div class="section-header-row">
+        <div class="detail-tabs">
+          <button id="btn-tab-assignments" class="detail-tab-btn tab-active" onclick="switchClassDetailTab('assignments')">Assignments</button>
+          <button id="btn-tab-students" class="detail-tab-btn" onclick="switchClassDetailTab('students')">Students</button>
+        </div>
+        <button id="btn-open-invite-modal" class="btn-secondary">Invite Code</button>
+      </div>
+      <div id="invite-code-modal" class="hidden">
+        <div id="invite-code-modal-backdrop" onclick="hideInviteCodeModal()"></div>
+        <div id="invite-code-modal-dialog">
+          <p id="invite-code-modal-title">Invite Code</p>
+          <div id="invite-code-display"></div>
+          <p id="invite-code-expiry"></p>
+          <div id="invite-code-modal-buttons">
+            <button id="btn-close-invite-modal" onclick="hideInviteCodeModal()">Close</button>
+            <button id="btn-regenerate-code">Regenerate</button>
+          </div>
+        </div>
+      </div>
+      <div id="class-assignments" class="lesson-library-card">
+        <div class="section-header-row">
+          <p class="lesson-library-heading">Assignments</p>
+          <button id="btn-create-assignment" class="btn-small">+ Create Assignment</button>
+        </div>
+        <div id="assignments-list"></div>
+      </div>
+      <div id="create-assignment-modal" class="hidden">
+        <div id="create-assignment-modal-backdrop" onclick="hideCreateAssignmentForm()"></div>
+        <div id="create-assignment-modal-dialog">
+          <p id="create-assignment-modal-title">Create Assignment</p>
+          <div class="upload-area" id="assignment-upload-area">
+            <div class="upload-icon">⬆</div>
+            <p class="upload-hint">Drop a file here, or click to browse</p>
+            <p class="upload-types">PDF · DOCX · PPTX</p>
+            <input type="file" id="assignment-file-input" accept=".pdf,.docx,.pptx" />
+          </div>
+          <div id="assignment-file-status" class="file-status hidden">
+            <span class="file-icon">📄</span>
+            <span id="assignment-file-name"></span>
+            <button class="file-clear" onclick="clearAssignmentFile()">✕</button>
+          </div>
+          <p id="create-assignment-error" class="auth-error"></p>
+          <div id="create-assignment-modal-buttons">
+            <button id="btn-cancel-assignment" onclick="hideCreateAssignmentForm()">Cancel</button>
+            <button id="btn-generate-assignment" class="btn-generate" onclick="generateAssignment()" disabled>Generate Lesson →</button>
+          </div>
+        </div>
+      </div>
+      <div id="class-roster" class="lesson-library-card hidden">
+        <p class="lesson-library-heading">Students</p>
+        <div id="roster-list"></div>
+      </div>
+    </main>
+  </div>
+
     <!-- Loading state -->
     <div id="loading-screen" class="hidden">
       <div class="loader-inner">
@@ -101,8 +223,10 @@
         <div id="topbar-quicknav">
           <button id="btn-home" onclick="confirmHome()">Home</button>
           <div class="topnav-right">
-            <button id="btn-to-progress" onclick="switchScene('progress')">Progress</button>
-            <button id="btn-to-lessons" onclick="switchScene('lessons')">Lessons</button>
+            <button id="btn-to-classes-slideshow" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+            <button id="btn-to-progress" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+            <button id="btn-to-lessons" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+            <button id="btn-to-assignments-slideshow" class="nav-assignments-btn hidden" onclick="goToAssignments()">Assignments</button>
             <div id="auth-control-slideshow" class="auth-control"></div>
           </div>
         </div>
@@ -111,6 +235,16 @@
           <button id="btn-to-study" onclick="switchScene('study')">Study &#8594;</button>
         </div>
       </header>
+
+      <div id="assignment-preview-banner-slideshow" class="assignment-preview-banner hidden">
+        <span class="assignment-preview-label">Student View</span>
+        <div class="assignment-preview-actions">
+          <button id="btn-discard-assignment-slideshow" class="btn-secondary" onclick="confirmDiscardAssignment()">Discard</button>
+          <button id="btn-save-draft-slideshow" class="btn-secondary" onclick="saveAssignmentAsDraft()">Save as Draft</button>
+          <button id="btn-publish-assignment-slideshow" class="btn-generate" onclick="showPublishModal()">Publish</button>
+        </div>
+      </div>
+      <div id="assignment-preview-frame-slideshow" class="assignment-preview-frame hidden"></div>
 
       <!-- Slide stage -->
       <main id="stage">
@@ -193,8 +327,10 @@
       <div id="study-topbar-quicknav">
         <button id="btn-home-study" onclick="confirmHome()">Home</button>
         <div class="topnav-right">
-          <button id="btn-to-progress-study" onclick="switchScene('progress')">Progress</button>
-          <button id="btn-to-lessons-study" onclick="switchScene('lessons')">Lessons</button>
+          <button id="btn-to-classes-study" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+          <button id="btn-to-progress-study" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+          <button id="btn-to-lessons-study" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
+          <button id="btn-to-assignments-study" class="nav-assignments-btn hidden" onclick="goToAssignments()">Assignments</button>
           <div id="auth-control-study" class="auth-control"></div>
         </div>
       </div>
@@ -203,6 +339,16 @@
         <button id="btn-to-slides" onclick="switchScene('slideshow')">&#8592; Slides</button>
       </div>
     </header>
+
+    <div id="assignment-preview-banner-study" class="assignment-preview-banner hidden">
+      <span class="assignment-preview-label">Student View</span>
+      <div class="assignment-preview-actions">
+        <button id="btn-discard-assignment-study" class="btn-secondary" onclick="confirmDiscardAssignment()">Discard</button>
+        <button id="btn-save-draft-study" class="btn-secondary" onclick="saveAssignmentAsDraft()">Save as Draft</button>
+        <button id="btn-publish-assignment-study" class="btn-generate" onclick="showPublishModal()">Publish</button>
+      </div>
+    </div>
+    <div id="assignment-preview-frame-study" class="assignment-preview-frame hidden"></div>
 
     <aside id="concept-nav">
       <!-- concept list injected here -->
@@ -214,6 +360,7 @@
       </div>
       <div id="concept-detail" class="hidden"></div>
     </main>
+    
   </div>
 
 
@@ -221,7 +368,8 @@
     <header id="progress-topbar">
       <button id="btn-home-progress" onclick="confirmHome()">Home</button>
       <div id="progress-course-name"></div>
-      <button id="btn-to-lessons-progress" onclick="switchScene('lessons')">Lessons</button>
+      <button id="btn-to-classes-progress" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+      <button id="btn-to-lessons-progress" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
       <!-- progress-topbar -->
       <div id="auth-control-progress" class="auth-control"></div>
       <button id="btn-back-progress" onclick="goBackFromProgress()">Back</button>
@@ -244,13 +392,14 @@
     <header id="lessons-topbar">
       <button id="btn-home-lessons" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
-        <button id="btn-to-progress-lessons" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-classes-lessons" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+        <button id="btn-to-progress-lessons" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <!-- lessons-topbar, inside .topnav-right -->
         <div id="auth-control-lessons" class="auth-control"></div>
         <button id="btn-back-lessons" onclick="goBackFromProgress()">Back</button>
       </div>
     </header>
-    <main id="lessons-content">
+    <main id="lessons-content">w
       <h1 class="lessons-page-heading">My Lessons</h1>
       <div id="lesson-library" class="lesson-library-card hidden">
         <p class="lesson-library-heading">Lesson Library</p>
@@ -264,8 +413,9 @@
       <button id="btn-home-account" onclick="confirmHome()">Home</button>
       <div class="topnav-right">
         <!-- account-topbar, inside .topnav-right -->
-        <button id="btn-to-progress-account" onclick="switchScene('progress')">Progress</button>
-        <button id="btn-to-lessons-account" onclick="switchScene('lessons')">Lessons</button>
+        <button id="btn-to-classes-account" class="nav-classes-btn hidden" onclick="switchScene('classes')">Classes</button>
+        <button id="btn-to-progress-account" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
+        <button id="btn-to-lessons-account" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <button id="btn-account-current" class="topnav-current" disabled>Account</button>
         <button id="btn-back-account" onclick="goBackFromProgress()">Back</button>
       </div>
@@ -338,6 +488,48 @@
       </div>
     </div>
 
+    <div id="publish-modal" class="hidden">
+      <div id="publish-modal-backdrop" onclick="hidePublishModal()"></div>
+      <div id="publish-modal-dialog">
+        <p id="publish-modal-title">Publish Assignment</p>
+        <label class="auth-label" for="publish-assignment-title">Assignment title (optional)</label>
+        <input type="text" id="publish-assignment-title" placeholder="Uses the lesson's generated title if left blank" maxlength="120">
+        <label class="auth-label" for="publish-due-date">Due date (optional)</label>
+        <div class="due-date-row">
+          <input type="date" id="publish-due-date">
+          <input type="time" id="publish-due-time" value="23:59">
+        </div>
+        <label class="auth-label" for="publish-max-attempts">Max quiz attempts per concept (optional)</label>
+        <input type="number" id="publish-max-attempts" min="1">
+        <p id="publish-modal-error" class="auth-error"></p>
+        <div id="publish-modal-buttons">
+          <button id="btn-cancel-publish" onclick="hidePublishModal()">Cancel</button>
+          <button id="btn-confirm-publish" onclick="confirmPublishAssignment()">Publish</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="edit-assignment-modal" class="hidden">
+      <div id="edit-assignment-modal-backdrop" onclick="hideEditAssignmentModal()"></div>
+      <div id="edit-assignment-modal-dialog">
+        <p id="edit-assignment-modal-title">Edit Assignment</p>
+        <label class="auth-label" for="edit-assignment-title">Assignment title (optional)</label>
+        <input type="text" id="edit-assignment-title" placeholder="Uses the lesson's generated title if left blank" maxlength="120">
+        <label class="auth-label" for="edit-assignment-due-date">Due date (optional)</label>
+        <div class="due-date-row">
+          <input type="date" id="edit-assignment-due-date">
+          <input type="time" id="edit-assignment-due-time" value="23:59">
+        </div>
+        <label class="auth-label" for="edit-assignment-max-attempts">Max quiz attempts per concept (optional)</label>
+        <input type="number" id="edit-assignment-max-attempts" min="1">
+        <p id="edit-assignment-modal-error" class="auth-error"></p>
+        <div id="edit-assignment-modal-buttons">
+          <button id="btn-cancel-edit-assignment" onclick="hideEditAssignmentModal()">Cancel</button>
+          <button id="btn-confirm-edit-assignment" onclick="confirmEditAssignment()">Confirm</button>
+        </div>
+      </div>
+    </div>
+
     <div id="delete-modal" class="hidden">
       <div id="delete-modal-backdrop" onclick="cancelDeleteModal()"></div>
       <div id="delete-modal-dialog">
@@ -348,6 +540,8 @@
         </div>
       </div>
     </div>
+
+    <div id="toast" class="hidden"></div>
 
   </div>
 
