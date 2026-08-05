@@ -38,7 +38,8 @@ from db import (
     create_assignment, get_assignment, get_assignments_for_class, 
     publish_assignment, archive_assignment, delete_assignment, get_assignment_for_lesson,
     resolve_lesson_access, is_enrolled, get_published_assignments_for_student,
-    get_assigned_lessons_for_student, get_assigned_lessons_for_student_by_teacher
+    get_assigned_lessons_for_student, get_assigned_lessons_for_student_by_teacher,
+    update_assignment
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -641,6 +642,20 @@ def publish_assignment_route(class_id, assignment_id):
 
     body = request.get_json(force=True) or {}
     publish_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>/assignments/<int:assignment_id>", methods=["PATCH"])
+def update_assignment_route(class_id, assignment_id):
+    user_id, _ = current_identity()
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    assignment = get_assignment(assignment_id)
+    if not assignment or assignment["class_id"] != class_id or assignment["status"] != "published":
+        return jsonify({"error": "Assignment not found"}), 404
+
+    body = request.get_json(force=True) or {}
+    update_assignment(assignment_id, due_at=body.get("due_at"), max_attempts=body.get("max_attempts"))
     return jsonify({"ok": True})
 
 

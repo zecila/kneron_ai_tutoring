@@ -524,6 +524,16 @@ def delete_assignment(assignment_id):
     conn.commit()
 
 
+def update_assignment(assignment_id, due_at=None, max_attempts=None):
+    conn = get_db()
+    conn.execute(
+        "UPDATE assignments SET due_at = ?, max_attempts = ? WHERE id = ? AND status = 'published'",
+        (due_at, max_attempts, assignment_id)
+    )
+    conn.commit()
+    conn.close()
+
+
 def create_lesson_owner(lesson_id, session_id, user_id=None):
     conn = get_db()
     conn.execute(

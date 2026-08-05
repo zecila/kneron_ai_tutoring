@@ -209,7 +209,7 @@ html, body {
   font-size: 14px;
   letter-spacing: 0.06em;
   color: var(--surface);
-  margin-bottom: 8px;
+  margin-bottom: 16px;
 }
 
 
@@ -829,6 +829,7 @@ html, body {
   justify-content: space-between;
   width: 100%;
   max-width: 720px;
+  margin-bottom: 16px;
 }
 
 .btn-small {
@@ -1268,6 +1269,7 @@ html, body {
 }
 
 #publish-due-date,
+#publish-due-time,
 #publish-max-attempts {
   width: 100%;
   padding: 10px 14px;
@@ -1281,10 +1283,18 @@ html, body {
 }
 
 #publish-due-date:focus,
+#publish-due-time:focus,
 #publish-max-attempts:focus {
   outline: none;
   border-color: var(--accent);
 }
+
+.due-date-row {
+  display: flex;
+  gap: 8px;
+}
+.due-date-row input[type="date"] { flex: 2; }
+.due-date-row input[type="time"] { flex: 1; }
 
 #publish-modal-error {
   margin-top: 4px;
@@ -1329,6 +1339,107 @@ html, body {
 #btn-confirm-publish:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
+}
+
+#btn-cancel-edit-assignment {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 200ms, color 200ms;
+}
+#btn-cancel-edit-assignment:hover {
+  border-color: var(--surface);
+  color: var(--surface);
+}
+
+#btn-confirm-edit-assignment {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: white;
+  padding: 8px 24px;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 200ms, border-color 200ms;
+}
+#btn-confirm-edit-assignment:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+}
+
+/* mirrors #publish-modal — same fields, reused as the edit modal */
+#edit-assignment-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#edit-assignment-modal.hidden { display: none !important; }
+
+#edit-assignment-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+#edit-assignment-modal-dialog {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  z-index: 1;
+  min-width: 420px;
+}
+
+#edit-assignment-modal-title {
+  font-family: var(--font-display);
+  font-size: 1.2rem;
+  color: var(--surface);
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+#edit-assignment-due-date,
+#edit-assignment-due-time,
+#edit-assignment-max-attempts {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+  color-scheme: dark;
+}
+
+#edit-assignment-due-date:focus,
+#edit-assignment-due-time:focus,
+#edit-assignment-max-attempts:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+#edit-assignment-modal-error { margin-top: 4px; }
+
+#edit-assignment-modal-buttons {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 /* ── Student roster page ─────────────────────────────────────────────────────────────── */
@@ -1388,6 +1499,35 @@ html, body {
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.lesson-library-edit {
+  position: absolute;
+  top: 50%;
+  right: 40px;   /* sits just left of the delete "✕" at right: 12px */
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms, color 150ms;
+}
+
+.lesson-library-item:hover .lesson-library-edit {
+  opacity: 1;
+}
+
+.lesson-library-edit:hover {
+  color: var(--accent);
+}
+
+/* Assignment rows need extra gutter for edit + delete icons side by side;
+   scoped to #assignments-list so other lists (roster, lessons, classes)
+   keep their normal single-icon gutter. */
+#assignments-list .lesson-library-item {
+  padding-right: 72px;
 }
 
 /* ── App layout ─────────────────────────────────────────────────────────────── */

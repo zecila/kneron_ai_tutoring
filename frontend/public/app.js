@@ -1203,7 +1203,9 @@ function hidePublishModal() {
 }
 
 async function confirmPublishAssignment() {
-  const dueDate = document.getElementById("publish-due-date").value || null;
+  const dueDate = document.getElementById("publish-due-date").value;
+  const dueTime = document.getElementById("publish-due-time").value || "23:59";
+  const dueDateTime = dueDate ? new Date(`${dueDate}T${dueTime}`).toISOString() : null;
   const maxAttemptsRaw = document.getElementById("publish-max-attempts").value;
   const maxAttempts = maxAttemptsRaw ? parseInt(maxAttemptsRaw, 10) : null;
   const errorEl = document.getElementById("publish-modal-error");
@@ -1212,7 +1214,7 @@ async function confirmPublishAssignment() {
     const res = await fetch(`/api/classes/${activeClassId}/assignments/${activeAssignmentId}/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ due_at: dueDate, max_attempts: maxAttempts }),
+      body: JSON.stringify({ due_at: dueDateTime, max_attempts: maxAttempts }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not publish assignment");
@@ -1263,12 +1265,26 @@ async function loadAssignmentsList(classId) {
       statusSpan.className = `lesson-library-status lesson-status-${a.status}`;
       statusSpan.textContent = a.status === "draft" ? "Draft" : a.status === "published" ? "Published" : "Archived";
 
+      item.append(nameSpan, statusSpan);
+
+      if (a.status === "published") {
+        const editBtn = document.createElement("button");
+        editBtn.className = "lesson-library-edit";
+        editBtn.setAttribute("aria-label", "Edit assignment");
+        editBtn.textContent = "✎";
+        editBtn.onclick = (e) => {
+          e.stopPropagation();
+          showEditAssignmentModal(classId, a.id, a.due_at, a.max_attempts);
+        };
+        item.appendChild(editBtn);
+      }
+
       const deleteBtn = document.createElement("button");
       deleteBtn.className = "lesson-library-delete";
       deleteBtn.setAttribute("aria-label", a.status === "draft" ? "Discard assignment" : "Archive assignment");
       deleteBtn.textContent = "✕";
+      item.appendChild(deleteBtn);
 
-      item.append(nameSpan, statusSpan, deleteBtn);
       item.onclick = () => {
         activeClassId = classId;
         activeAssignmentId = a.status === "draft" ? a.id : null;
@@ -1284,6 +1300,64 @@ async function loadAssignmentsList(classId) {
     document.getElementById("assignments-empty")?.classList.toggle("hidden", assignments.length > 0);
   } catch (err) {
     console.warn("Could not load assignments:", err.message);
+  }
+}
+
+// converts a stored ISO due_at into the "YYYY-MM-DDTHH:MM" format datetime-local inputs expect, in the *local* tz
+function toLocalDatetimeValue(isoString) {
+  const d = new Date(isoString);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// ─── Edit Assignment (due date / max attempts on an already-published assignment) ──────────
+let editingAssignment = null; // { classId, assignmentId }
+
+function showEditAssignmentModal(classId, assignmentId, dueAt, maxAttempts) {
+  editingAssignment = { classId, assignmentId };
+  const editDate = document.getElementById("edit-assignment-due-date");
+  const editTime = document.getElementById("edit-assignment-due-time");
+  if (dueAt) {
+    const d = new Date(dueAt);
+    const pad = n => String(n).padStart(2, "0");
+    editDate.value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    editTime.value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } else {
+    editDate.value = "";
+    editTime.value = "23:59";
+  }
+  document.getElementById("edit-assignment-max-attempts").value = maxAttempts ?? "";
+  document.getElementById("edit-assignment-modal-error").textContent = "";
+  document.getElementById("edit-assignment-modal").classList.remove("hidden");
+}
+
+function hideEditAssignmentModal() {
+  document.getElementById("edit-assignment-modal").classList.add("hidden");
+  editingAssignment = null;
+}
+
+async function confirmEditAssignment() {
+  if (!editingAssignment) return;
+  const { classId, assignmentId } = editingAssignment;
+  const dueDate = document.getElementById("edit-assignment-due-date").value;
+  const dueTime = document.getElementById("edit-assignment-due-time").value || "23:59";
+  const dueDateTime = dueDate ? new Date(`${dueDate}T${dueTime}`).toISOString() : null;
+  const maxAttemptsRaw = document.getElementById("edit-assignment-max-attempts").value;
+  const maxAttempts = maxAttemptsRaw ? parseInt(maxAttemptsRaw, 10) : null;
+  const errorEl = document.getElementById("edit-assignment-modal-error");
+
+  try {
+    const res = await fetch(`/api/classes/${classId}/assignments/${assignmentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ due_at: dueDate, max_attempts: maxAttempts }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not update assignment");
+    hideEditAssignmentModal();
+    loadAssignmentsList(classId);
+  } catch (err) {
+    errorEl.textContent = err.message;
   }
 }
 
@@ -1311,7 +1385,8 @@ async function loadStudentAssignmentsList(classId) {
  
        const dueSpan = document.createElement("span");
        dueSpan.className = "lesson-library-status";
-       dueSpan.textContent = a.due_at ? `Due ${new Date(a.due_at).toLocaleDateString()}` : "No due date";
+       // line ~1367
+       dueSpan.textContent = a.due_at ? `Due ${new Date(a.due_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}` : "No due date";
  
        item.append(nameSpan, dueSpan);
        item.onclick = () => {
@@ -1448,7 +1523,7 @@ async function loadProgressPage(studentName = null, progressUrl = "/api/progress
       : `<span class="progress-source-badge progress-source-personal">Personal</span>`;
 
     const dueLine = source.type === "class" && source.due_at
-      ? `<span class="progress-due-date">Due ${new Date(source.due_at).toLocaleDateString()}</span>`
+      ? `<span class="progress-due-date">Due ${new Date(source.due_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</span>`
       : "";
 
     card.innerHTML = `

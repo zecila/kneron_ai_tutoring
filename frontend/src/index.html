@@ -493,13 +493,35 @@
       <div id="publish-modal-dialog">
         <p id="publish-modal-title">Publish Assignment</p>
         <label class="auth-label" for="publish-due-date">Due date (optional)</label>
-        <input type="date" id="publish-due-date">
+        <div class="due-date-row">
+          <input type="date" id="publish-due-date">
+          <input type="time" id="publish-due-time" value="23:59">
+        </div>
         <label class="auth-label" for="publish-max-attempts">Max quiz attempts per concept (optional)</label>
         <input type="number" id="publish-max-attempts" min="1">
         <p id="publish-modal-error" class="auth-error"></p>
         <div id="publish-modal-buttons">
           <button id="btn-cancel-publish" onclick="hidePublishModal()">Cancel</button>
           <button id="btn-confirm-publish" onclick="confirmPublishAssignment()">Publish</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="edit-assignment-modal" class="hidden">
+      <div id="edit-assignment-modal-backdrop" onclick="hideEditAssignmentModal()"></div>
+      <div id="edit-assignment-modal-dialog">
+        <p id="edit-assignment-modal-title">Edit Assignment</p>
+        <label class="auth-label" for="edit-assignment-due-date">Due date (optional)</label>
+        <div class="due-date-row">
+          <input type="date" id="edit-assignment-due-date">
+          <input type="time" id="edit-assignment-due-time" value="23:59">
+        </div>
+        <label class="auth-label" for="edit-assignment-max-attempts">Max quiz attempts per concept (optional)</label>
+        <input type="number" id="edit-assignment-max-attempts" min="1">
+        <p id="edit-assignment-modal-error" class="auth-error"></p>
+        <div id="edit-assignment-modal-buttons">
+          <button id="btn-cancel-edit-assignment" onclick="hideEditAssignmentModal()">Cancel</button>
+          <button id="btn-confirm-edit-assignment" onclick="confirmEditAssignment()">Confirm</button>
         </div>
       </div>
     </div>
