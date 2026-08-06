@@ -1551,7 +1551,9 @@ html, body {
 }
 
 #assignment-preview-banner-slideshow,
-#assignment-preview-banner-study {
+#assignment-preview-banner-study,
+#trial-lesson-banner-slideshow, 
+#trial-lesson-banner-study {
   grid-area: banner;
 }
 
@@ -3059,7 +3061,8 @@ html, body {
   overflow: hidden;
 }
 
-#assignment-preview-banner-study {
+#assignment-preview-banner-study,
+#trial-lesson-banner-study {
   grid-area: study-banner;
 }
 

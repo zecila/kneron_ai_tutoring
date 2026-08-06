@@ -29,8 +29,8 @@ from db import (
     create_lesson_owner, get_lessons_for_owner, owns_lesson, resolve_lesson_access,
     get_db, update_user_password, owns_lesson, get_db, delete_lesson,
     delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
-    get_attempt_count, get_max_batch, deactivate_batch, get_active_quiz_questions, 
-    save_item, unsave_item, get_saved_items, update_user_name,
+    delete_quiz_questions_for_lesson, get_attempt_count, get_max_batch, deactivate_batch, 
+    get_active_quiz_questions, save_item, unsave_item, get_saved_items, update_user_name,
     create_password_reset, get_valid_reset, consume_reset_token, 
     create_class, archive_class, get_classes_for_teacher, get_classes_for_student,
     get_user_role, generate_join_code, get_valid_join_code_for_class, 
@@ -1055,6 +1055,7 @@ def _run_pipeline(lesson_id: str, file_path: str, original_filename: str, resume
         if stage in (Status.EXTRACTING, Status.BUILDING_CURRICULUM):
             stage = Status.BUILDING_CURRICULUM
             write_meta(lesson_id, status=stage)
+            delete_quiz_questions_for_lesson(lesson_id)
             curriculum = run_curriculum_extraction(normalized, lesson_id)
             for concept in curriculum["curriculum_graph"]["concepts"]:
                 questions = generate_quiz_batch(
@@ -1201,9 +1202,10 @@ def create_lesson():
     lesson_id = new_lesson_id()
     user_id, session_id = current_identity()
 
-    existing = get_lessons_for_owner(user_id, session_id)
-    if len(existing) >= 10:
-        return jsonify({"error": "Lesson limit reached (10 max). Delete a lesson to add a new one."}), 400
+    if get_user_role(user_id) != "teacher":
+        existing = get_lessons_for_owner(user_id, session_id)
+        if len(existing) >= 10:
+            return jsonify({"error": "Lesson limit reached (10 max). Delete a lesson to add a new one."}), 400
     
     create_lesson_owner(lesson_id, session_id, user_id)
     os.makedirs(UPLOAD_DIR, exist_ok=True)

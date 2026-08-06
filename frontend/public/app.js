@@ -458,7 +458,7 @@ async function loadClassesPage() {
     nameSpan.textContent = c.name;
     row.appendChild(nameSpan);
 
-    row.onclick = () => openClassDetail(c.id, c.name);
+    row.onclick = () => guardTrialLesson(() => openClassDetail(c.id, c.name));
 
     if (!isTeacher) {
       const teacherSpan = document.createElement("span");
@@ -732,7 +732,8 @@ document.getElementById("btn-submit-join-class")?.addEventListener("click", asyn
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", async () => {
+  await checkAuth();
   if (lessonId) {
     enterLesson(lessonId);
   } else {
@@ -741,7 +742,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("keydown", handleKeyboard);
   initUpload();
   initAssignmentUpload();
-  checkAuth();
   checkForResetToken();
   initAuthForm();
 });
@@ -779,12 +779,6 @@ async function fetchAssignmentContext(id) {
   } catch {
     activeAssignmentId = null;
   }
-}
-
-function updateAssignmentPreviewUI() {
-  document.querySelectorAll(".assignment-preview-banner, .assignment-preview-frame").forEach(el => {
-    el.classList.toggle("hidden", !activeAssignmentId);
-  });
 }
 
 async function loadSlideshow(justGenerated = false) {
@@ -868,6 +862,7 @@ async function loadSlideshow(justGenerated = false) {
       showScreen("slideshow");
       lastScene = "slideshow";
       updateAssignmentPreviewUI();
+      updateTrialLessonUI();
       fitSlideToStage();
       window.addEventListener("resize", fitSlideToStage);
     };
@@ -978,6 +973,7 @@ async function loadLessonLibrary() {
 // ─── Delete modal (shared by lessons and account deletion) ──────────────────
 
 let pendingDeleteAction = null; // { type: "lesson", id } or { type: "account" }
+let teacherTrialLessonId = null; // set while a teacher is viewing their home-page demo upload; ephemeral, discarded on exit
 
 function confirmDeleteLesson(id) {
   pendingDeleteAction = { type: "lesson", id };
@@ -1114,6 +1110,12 @@ function clearFile() {
   document.getElementById("btn-generate").disabled = true;
 }
 
+function updateTrialLessonUI() {
+  document.querySelectorAll("#trial-lesson-banner-slideshow, #trial-lesson-frame-slideshow, #trial-lesson-banner-study, #trial-lesson-frame-study").forEach(el => {
+    el.classList.toggle("hidden", !teacherTrialLessonId);
+  });
+}
+
 async function generateLesson() {
   document.getElementById("welcome-screen").classList.add("hidden");
   showScreen("loading");
@@ -1128,9 +1130,10 @@ async function generateLesson() {
     const data = await uploadRes.json();
     if (!uploadRes.ok) throw new Error(data.error || "Upload failed");
     lessonId = data.lesson_id;
+    if (currentUser?.role === "teacher") teacherTrialLessonId = lessonId;
 
     history.replaceState(null, "", `?lesson=${lessonId}`);
-
+    
     await pollLessonStatus(lessonId);
     await loadSlideshow(true);
   } catch (err) {
@@ -1443,17 +1446,60 @@ function updateAssignmentPreviewUI() {
 
 function confirmHome() {
   const isTeacher = currentUser?.role === "teacher";
+  if (teacherTrialLessonId) {
+    document.getElementById("home-modal-message").textContent =
+      "Your sample lesson will be permanently deleted. Are you sure?";
+    document.getElementById("home-modal").classList.remove("hidden");
+    return;
+  }
+  document.getElementById("home-modal-message").textContent = "Ending Lesson. Are you sure?";
   if (!lessonId || isTeacher) { doGoHome(); return; }
   document.getElementById("home-modal").classList.remove("hidden");
 }
 
 function cancelHome() {
   document.getElementById("home-modal").classList.add("hidden");
+  pendingTrialAction = null;
+}
+
+function confirmModalAction() {
+  if (pendingTrialAction) {
+    const action = pendingTrialAction;
+    pendingTrialAction = null;
+    document.getElementById("home-modal").classList.add("hidden");
+    discardTrialLesson();
+    action();
+    return;
+  }
+  doGoHome();
+}
+
+let pendingTrialAction = null; // callback to run after a trial-lesson discard confirm, when not going Home
+
+function discardTrialLesson() {
+  if (!teacherTrialLessonId) return;
+  const trialId = teacherTrialLessonId;
+  teacherTrialLessonId = null;
+  lastScene = "welcome"; // don't let Back route into the now-deleted trial lesson
+  fetch(`/api/lessons/${trialId}`, { method: "DELETE" })
+    .catch(err => console.warn("Could not discard trial lesson:", err.message));
+}
+
+// Call before any navigation that would conflict with an in-progress trial lesson.
+// Runs `action` immediately if there's no trial in progress; otherwise shows the
+// same confirm modal Home uses, and runs `action` only if the teacher confirms.
+function guardTrialLesson(action) {
+  if (!teacherTrialLessonId) { action(); return; }
+  pendingTrialAction = action;
+  document.getElementById("home-modal-message").textContent =
+    "Your sample lesson will be permanently deleted. Are you sure?";
+  document.getElementById("home-modal").classList.remove("hidden");
 }
 
 function doGoHome() {
   document.getElementById("home-modal").classList.add("hidden");
   stopNarrationFully();
+  discardTrialLesson();
   lessonId = null;
   if (activeAssignmentId) {
     const classId = activeClassId;
@@ -3198,8 +3244,8 @@ function goBackFromProgress() {
 }
 
 function switchScene(name) {
-  if (name !== "progress" && name !== "lessons" && name !== "account" && name !== "attempt-detail") lastScene = name; // track last scene for Back button
-
+  if (name !== "progress" && name !== "lessons" && name !== "account" && name !== "attempt-detail" && name !== "classes" && name !== "class-detail") lastScene = name;
+  
   if (name === "study" || name === "slideshow") {
     const url = new URL(window.location);
     url.searchParams.set("scene", name); // persist current scene across refresh
@@ -3235,7 +3281,7 @@ function switchScene(name) {
   
   document.getElementById("slideshow").classList.toggle("hidden", name !== "slideshow");
   document.getElementById("study").classList.toggle("hidden", name !== "study");
-  if (name === "slideshow" || name === "study") updateAssignmentPreviewUI();
+  if (name === "slideshow" || name === "study") { updateAssignmentPreviewUI(); updateTrialLessonUI(); }
   document.getElementById("progress-screen").classList.toggle("hidden", name !== "progress");
   document.getElementById("attempt-detail-screen").classList.toggle("hidden", name !== "attempt-detail");  
   document.getElementById("welcome-screen").classList.toggle("hidden", name !== "welcome");

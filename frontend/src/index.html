@@ -73,7 +73,7 @@
         <button id="btn-to-progress-classes" class="nav-progress-btn" onclick="switchScene('progress')">Progress</button>
         <button id="btn-to-lessons-classes" class="nav-lessons-btn" onclick="switchScene('lessons')">Lessons</button>
         <div id="auth-control-classes" class="auth-control"></div>
-        <button id="btn-back-classes" onclick="showWelcome()">Back</button>
+        <button id="btn-back-classes" onclick="goBackFromProgress()">Back</button>
       </div>
     </header>
     <main id="classes-content">
@@ -246,6 +246,11 @@
       </div>
       <div id="assignment-preview-frame-slideshow" class="assignment-preview-frame hidden"></div>
 
+      <div id="trial-lesson-banner-slideshow" class="assignment-preview-banner hidden">
+        <span class="assignment-preview-label">Sample Lesson</span>
+      </div>
+      <div id="trial-lesson-frame-slideshow" class="assignment-preview-frame hidden"></div>
+
       <!-- Slide stage -->
       <main id="stage">
         <div id="slide-scaler">
@@ -349,6 +354,11 @@
       </div>
     </div>
     <div id="assignment-preview-frame-study" class="assignment-preview-frame hidden"></div>
+
+    <div id="trial-lesson-banner-study" class="assignment-preview-banner hidden">
+      <span class="assignment-preview-label">Sample Lesson</span>
+    </div>
+    <div id="trial-lesson-frame-study" class="assignment-preview-frame hidden"></div>
 
     <aside id="concept-nav">
       <!-- concept list injected here -->
@@ -483,7 +493,7 @@
         <p id="home-modal-message">Ending Lesson. Are you sure?</p>
         <div id="home-modal-buttons">
           <button id="home-modal-cancel" onclick="cancelHome()">Cancel</button>
-          <button id="home-modal-confirm" onclick="doGoHome()">Confirm</button>
+          <button id="home-modal-confirm" onclick="confirmModalAction()">Confirm</button>
         </div>
       </div>
     </div>
