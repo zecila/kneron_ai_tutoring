@@ -374,6 +374,27 @@
   </div>
 
 
+  <!-- Tutor chat widget (slideshow + study scenes only) -->
+  <div id="tutor-chat-widget" class="hidden">
+    <button id="tutor-chat-toggle" aria-label="Open tutor chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+      </svg>
+    </button>
+    <div id="tutor-chat-panel" class="hidden">
+      <div id="tutor-chat-header">
+        <span>Tutor Agent</span>
+        <button id="tutor-chat-close" aria-label="Close chat">✕</button>
+      </div>
+      <div id="tutor-chat-messages"></div>
+      <div id="tutor-chat-input-row">
+        <input type="text" id="tutor-chat-input" placeholder="Ask a question..." autocomplete="off">
+        <button id="tutor-chat-send" aria-label="Send message">&#8594;</button>
+      </div>
+    </div>
+  </div>
+
+
   <div id="progress-screen" class="hidden">
     <header id="progress-topbar">
       <button id="btn-home-progress" onclick="confirmHome()">Home</button>

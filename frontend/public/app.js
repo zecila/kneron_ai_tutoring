@@ -1746,6 +1746,7 @@ function showScreen(name) {
     document.getElementById("slideshow").classList.remove("hidden");
     document.getElementById("loading-screen").classList.add("hidden");
     document.getElementById("error-screen").classList.add("hidden");
+    document.getElementById("tutor-chat-widget").classList.remove("hidden");
   }
 }
 
@@ -2356,6 +2357,31 @@ function toggleSidebar() {
   // refit slide after grid transition completes
   setTimeout(fitSlideToStage, 220);
 }
+
+// ─── Chatbot toggle ───────────────────────────────────────────────────────────
+function toggleTutorChat() {
+  document.getElementById("tutor-chat-panel").classList.toggle("hidden");
+}
+
+function sendTutorChatMessage() {
+  const input = document.getElementById("tutor-chat-input");
+  const text = input.value.trim();
+  if (!text) return;
+  const messages = document.getElementById("tutor-chat-messages");
+  const bubble = document.createElement("div");
+  bubble.className = "tutor-chat-bubble tutor-chat-bubble-user";
+  bubble.textContent = text;
+  messages.appendChild(bubble);
+  messages.scrollTop = messages.scrollHeight;
+  input.value = "";
+}
+
+document.getElementById("tutor-chat-toggle").addEventListener("click", toggleTutorChat);
+document.getElementById("tutor-chat-close").addEventListener("click", toggleTutorChat);
+document.getElementById("tutor-chat-send").addEventListener("click", sendTutorChatMessage);
+document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendTutorChatMessage();
+});
 
 // ─── Animations ───────────────────────────────────────────────────────────────
 /*
@@ -3338,6 +3364,12 @@ function switchScene(name) {
   document.getElementById("class-detail-screen")?.classList.toggle("hidden", name !== "class-detail");
   document.getElementById("lessons-screen").classList.toggle("hidden", name !== "lessons");
   document.getElementById("account-screen").classList.toggle("hidden", name !== "account");
+
+  const inLesson = name === "slideshow" || name === "study";
+  document.getElementById("tutor-chat-widget").classList.toggle("hidden", !inLesson);
+  if (!inLesson) {
+    document.getElementById("tutor-chat-panel").classList.add("hidden");
+  }
 
 
   if (name === "progress") {
