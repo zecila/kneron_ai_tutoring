@@ -1343,7 +1343,8 @@ html, body {
   border-color: var(--accent-dim);
 }
 
-#btn-cancel-edit-assignment {
+#btn-cancel-edit-assignment,
+#btn-cancel-edit-class {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text-muted);
@@ -1354,12 +1355,14 @@ html, body {
   cursor: pointer;
   transition: border-color 200ms, color 200ms;
 }
-#btn-cancel-edit-assignment:hover {
+#btn-cancel-edit-assignment:hover,
+#btn-cancel-edit-class:hover {
   border-color: var(--surface);
   color: var(--surface);
 }
 
-#btn-confirm-edit-assignment {
+#btn-confirm-edit-assignment,
+#btn-confirm-edit-class {
   background: var(--accent);
   border: 1px solid var(--accent);
   color: white;
@@ -1370,13 +1373,15 @@ html, body {
   cursor: pointer;
   transition: background 200ms, border-color 200ms;
 }
-#btn-confirm-edit-assignment:hover {
+#btn-confirm-edit-assignment:hover,
+#btn-confirm-edit-class:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
 }
 
 /* mirrors #publish-modal — same fields, reused as the edit modal */
-#edit-assignment-modal {
+#edit-assignment-modal,
+#edit-class-modal {
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -1384,15 +1389,18 @@ html, body {
   align-items: center;
   justify-content: center;
 }
-#edit-assignment-modal.hidden { display: none !important; }
+#edit-assignment-modal.hidden,
+#edit-class-modal.hidden { display: none !important; }
 
-#edit-assignment-modal-backdrop {
+#edit-assignment-modal-backdrop,
+#edit-class-modal-backdrop {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
 }
 
-#edit-assignment-modal-dialog {
+#edit-assignment-modal-dialog,
+#edit-class-modal-dialog {
   position: relative;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -1406,7 +1414,8 @@ html, body {
   min-width: 420px;
 }
 
-#edit-assignment-modal-title {
+#edit-assignment-modal-title,
+#edit-class-modal-title {
   font-family: var(--font-display);
   font-size: 1.2rem;
   color: var(--surface);
@@ -1417,7 +1426,8 @@ html, body {
 #edit-assignment-due-date,
 #edit-assignment-due-time,
 #edit-assignment-title,
-#edit-assignment-max-attempts {
+#edit-assignment-max-attempts,
+#edit-class-name {
   width: 100%;
   padding: 10px 14px;
   border-radius: var(--radius);
@@ -1432,14 +1442,16 @@ html, body {
 #edit-assignment-due-date:focus,
 #edit-assignment-due-time:focus,
 #edit-assignment-title:focus,
-#edit-assignment-max-attempts:focus {
+#edit-assignment-max-attempts:focus,
+#edit-class-name:focus {
   outline: none;
   border-color: var(--accent);
 }
 
 #edit-assignment-modal-error { margin-top: 4px; }
 
-#edit-assignment-modal-buttons {
+#edit-assignment-modal-buttons,
+#edit-class-modal-buttons {
   display: flex;
   justify-content: center;
   gap: 12px;

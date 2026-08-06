@@ -460,6 +460,18 @@ async function loadClassesPage() {
 
     row.onclick = () => guardTrialLesson(() => openClassDetail(c.id, c.name));
 
+    if (isTeacher) {
+      const editBtn = document.createElement("button");
+      editBtn.className = "lesson-library-edit";
+      editBtn.setAttribute("aria-label", "Edit class");
+      editBtn.textContent = "✎";
+      editBtn.onclick = (e) => {
+        e.stopPropagation();
+        showEditClassModal(c.id, c.name);
+      };
+      row.appendChild(editBtn);
+    }
+
     if (!isTeacher) {
       const teacherSpan = document.createElement("span");
       teacherSpan.className = "lesson-library-status";
@@ -478,6 +490,42 @@ async function loadClassesPage() {
     }
     list.appendChild(row);
   });
+}
+
+// ─── Edit Class (rename) ──────────
+let editingClassId = null;
+
+function showEditClassModal(classId, name) {
+  editingClassId = classId;
+  document.getElementById("edit-class-name").value = name || "";
+  document.getElementById("edit-class-modal-error").textContent = "";
+  document.getElementById("edit-class-modal").classList.remove("hidden");
+}
+
+function hideEditClassModal() {
+  document.getElementById("edit-class-modal").classList.add("hidden");
+  editingClassId = null;
+}
+
+async function confirmEditClass() {
+  if (!editingClassId) return;
+  const name = document.getElementById("edit-class-name").value.trim();
+  const errorEl = document.getElementById("edit-class-modal-error");
+  if (!name) { errorEl.textContent = "Class name required"; return; }
+
+  try {
+    const res = await fetch(`/api/classes/${editingClassId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not update class");
+    hideEditClassModal();
+    loadClassesPage();
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
 }
 
 function confirmLeaveClass(classId, name) {
@@ -1052,7 +1100,7 @@ async function confirmDeleteModal() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       activeAssignmentId = null;
       if (lessonId) { lessonId = null; }
-      openClassDetail(action.classId);
+      openClassDetail(action.classId, document.getElementById("class-detail-name").textContent);
     } catch (err) {
       console.warn("Could not remove assignment:", err.message);
     }

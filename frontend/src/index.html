@@ -540,6 +540,20 @@
       </div>
     </div>
 
+    <div id="edit-class-modal" class="hidden">
+      <div id="edit-class-modal-backdrop" onclick="hideEditClassModal()"></div>
+      <div id="edit-class-modal-dialog">
+        <p id="edit-class-modal-title">Edit Class</p>
+        <label class="auth-label" for="edit-class-name">Class name</label>
+        <input type="text" id="edit-class-name" maxlength="120">
+        <p id="edit-class-modal-error" class="auth-error"></p>
+        <div id="edit-class-modal-buttons">
+          <button id="btn-cancel-edit-class" onclick="hideEditClassModal()">Cancel</button>
+          <button id="btn-confirm-edit-class" onclick="confirmEditClass()">Confirm</button>
+        </div>
+      </div>
+    </div>
+
     <div id="delete-modal" class="hidden">
       <div id="delete-modal-backdrop" onclick="cancelDeleteModal()"></div>
       <div id="delete-modal-dialog">

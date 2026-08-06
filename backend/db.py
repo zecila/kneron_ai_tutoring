@@ -299,6 +299,16 @@ def archive_class(class_id, teacher_id):
     conn.close()
 
 
+def update_class_name(class_id, teacher_id, name):
+    conn = get_db()
+    conn.execute(
+        "UPDATE classes SET name = ? WHERE id = ? AND teacher_id = ?",
+        (name, class_id, teacher_id)
+    )
+    conn.commit()
+    conn.close()
+    
+
 def get_classes_for_teacher(teacher_id, include_archived=False):
     conn = get_db()
     query = "SELECT * FROM classes WHERE teacher_id = ?"

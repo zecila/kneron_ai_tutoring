@@ -39,7 +39,7 @@ from db import (
     publish_assignment, archive_assignment, delete_assignment, get_assignment_for_lesson,
     resolve_lesson_access, is_enrolled, get_published_assignments_for_student,
     get_assigned_lessons_for_student, get_assigned_lessons_for_student_by_teacher,
-    update_assignment
+    update_assignment, update_class_name
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -434,6 +434,21 @@ def archive_class_route(class_id):
     if not require_teacher_owns_class(class_id, user_id):
         return jsonify({"error": "Class not found"}), 404
     archive_class(class_id, user_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>", methods=["PATCH"])
+def update_class_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Class name required"}), 400
+    update_class_name(class_id, user_id, name)
     return jsonify({"ok": True})
 
 
