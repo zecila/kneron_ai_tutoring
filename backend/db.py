@@ -299,6 +299,16 @@ def archive_class(class_id, teacher_id):
     conn.close()
 
 
+def update_class_name(class_id, teacher_id, name):
+    conn = get_db()
+    conn.execute(
+        "UPDATE classes SET name = ? WHERE id = ? AND teacher_id = ?",
+        (name, class_id, teacher_id)
+    )
+    conn.commit()
+    conn.close()
+    
+
 def get_classes_for_teacher(teacher_id, include_archived=False):
     conn = get_db()
     query = "SELECT * FROM classes WHERE teacher_id = ?"
@@ -665,20 +675,35 @@ def get_max_batch(lesson_id, concept_id):
 
 def insert_quiz_questions(lesson_id, concept_id, questions, generation_batch):
     conn = get_db()
-    now = datetime.now(timezone.utc).isoformat()
-    for i, q in enumerate(questions):
-        question_id = f"{lesson_id}_{concept_id}_b{generation_batch}_q{i:03d}"
-        conn.execute(
-            """INSERT INTO quiz_questions
-               (question_id, concept_id, lesson_id, question_text, type, choices,
-                answer, explanation, generation_batch, active, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
-            (question_id, concept_id, lesson_id, q["question"], q["type"],
-             json.dumps(q["choices"], ensure_ascii=False), q["answer"], q["explanation"],
-             generation_batch, now)
-        )
-    conn.commit()
-    conn.close()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        for i, q in enumerate(questions):
+            question_id = f"{lesson_id}_{concept_id}_b{generation_batch}_q{i:03d}"
+            conn.execute(
+                """INSERT INTO quiz_questions
+                   (question_id, concept_id, lesson_id, question_text, type, choices,
+                    answer, explanation, generation_batch, active, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                (question_id, concept_id, lesson_id, q["question"], q["type"],
+                 json.dumps(q["choices"], ensure_ascii=False), q["answer"], q["explanation"],
+                 generation_batch, now)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_quiz_questions_for_lesson(lesson_id):
+    """Clears any quiz questions already generated for this lesson — used
+    before a curriculum-stage retry, which regenerates the curriculum (and
+    therefore quiz questions) from scratch and would otherwise collide with
+    the deterministic question_id of anything inserted before the failure."""
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM quiz_questions WHERE lesson_id = ?", (lesson_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def deactivate_batch(lesson_id, concept_id, generation_batch):

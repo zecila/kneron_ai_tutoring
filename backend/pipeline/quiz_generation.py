@@ -15,8 +15,8 @@ client = OpenAI(
 	}
 )
 
-quiz_json_schema = {
-    "name": "quiz_batch",
+mc_json_schema = {
+    "name": "mc_quiz_batch",
     "strict": True,
     "schema": {
         "type": "object",
@@ -27,12 +27,49 @@ quiz_json_schema = {
                     "type": "object",
                     "properties": {
                         "question": {"type": "string"},
-                        "type": {"type": "string", "enum": ["multiple_choice", "true_false"]},
-                        "choices": {"type": "array", "items": {"type": "string"}},
-                        "answer": {"type": "string"},
+                        "type": {"type": "string", "enum": ["multiple_choice"]},
+                        "choices": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 4,
+                            "maxItems": 4
+                        },
+                        "answer_index": {"type": "integer", "minimum": 0, "maximum": 3},
                         "explanation": {"type": "string"}
                     },
-                    "required": ["question", "type", "choices", "answer", "explanation"],
+                    "required": ["question", "type", "choices", "answer_index", "explanation"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        "required": ["quiz_questions"],
+        "additionalProperties": False
+    }
+}
+
+tf_json_schema = {
+    "name": "tf_quiz_batch",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "quiz_questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "question": {"type": "string"},
+                        "type": {"type": "string", "enum": ["true_false"]},
+                        "choices": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["True", "False"]},
+                            "minItems": 2,
+                            "maxItems": 2
+                        },
+                        "answer_index": {"type": "integer", "minimum": 0, "maximum": 1},
+                        "explanation": {"type": "string"}
+                    },
+                    "required": ["question", "type", "choices", "answer_index", "explanation"],
                     "additionalProperties": False
                 }
             }
@@ -55,6 +92,10 @@ the correct answer cannot be identified by structure alone.
 
 For true_false questions, choices must be exactly ["True", "False"].
 
+The "answer" field must be the exact text of one of the "choices" strings,
+character for character. Never return a letter label like "A" or "B" —
+always copy the full choice text.
+
 All questions should read as self-contained lesson material. Do not reference the
 source document or say things like "as shown" or "in this lesson".
 
@@ -71,34 +112,34 @@ Key terms: {json.dumps(key_terms, ensure_ascii=False)}
 Generate the quiz questions for this concept.
 """.strip()
 
-    for backoff_attempt in range(4):
-        try:
-            response = client.chat.completions.create(
-                model="gpt-5.4-mini",
-                response_format={"type": "json_schema", "json_schema": quiz_json_schema},
-                messages=[
-                    {"role": "system", "content": quiz_system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0,
-                max_tokens=3000
-            )
-            break
-        except RateLimitError:
-            time.sleep(2 ** backoff_attempt)
-    else:
+    def _call(schema, count_hint):
+        prompt = user_prompt + f"\n\nGenerate {count_hint} questions."
+        for backoff_attempt in range(4):
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-5.4-mini",
+                    response_format={"type": "json_schema", "json_schema": schema},
+                    messages=[
+                        {"role": "system", "content": quiz_system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0,
+                    max_tokens=1800
+                )
+                return json.loads(response.choices[0].message.content)["quiz_questions"]
+            except RateLimitError:
+                time.sleep(2 ** backoff_attempt)
         raise RuntimeError("quiz generation exceeded retries after repeated rate limiting")
+
+    questions = _call(mc_json_schema, "4-6 multiple_choice") + _call(tf_json_schema, "2-4 true_false")
     
-    result = json.loads(response.choices[0].message.content)
-    questions = result["quiz_questions"]
     for q in questions:
         expected = 4 if q["type"] == "multiple_choice" else 2
         if len(q["choices"]) != expected:
             raise ValueError(f"Bad choices count for {q['type']}: {q['choices']}")
-        if q["answer"] not in q["choices"]:
-            raise ValueError(f"Answer not among choices: {q['answer']!r} not in {q['choices']}")
         if q["type"] == "true_false" and set(q["choices"]) != {"True", "False"}:
             raise ValueError(f"true_false choices must be ['True','False'], got {q['choices']}")
+        q["answer"] = q["choices"][q.pop("answer_index")]
         if q["type"] == "multiple_choice":
             random.shuffle(q["choices"])
     return questions

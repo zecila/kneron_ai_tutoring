@@ -29,8 +29,8 @@ from db import (
     create_lesson_owner, get_lessons_for_owner, owns_lesson, resolve_lesson_access,
     get_db, update_user_password, owns_lesson, get_db, delete_lesson,
     delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
-    get_attempt_count, get_max_batch, deactivate_batch, get_active_quiz_questions, 
-    save_item, unsave_item, get_saved_items, update_user_name,
+    delete_quiz_questions_for_lesson, get_attempt_count, get_max_batch, deactivate_batch, 
+    get_active_quiz_questions, save_item, unsave_item, get_saved_items, update_user_name,
     create_password_reset, get_valid_reset, consume_reset_token, 
     create_class, archive_class, get_classes_for_teacher, get_classes_for_student,
     get_user_role, generate_join_code, get_valid_join_code_for_class, 
@@ -39,7 +39,7 @@ from db import (
     publish_assignment, archive_assignment, delete_assignment, get_assignment_for_lesson,
     resolve_lesson_access, is_enrolled, get_published_assignments_for_student,
     get_assigned_lessons_for_student, get_assigned_lessons_for_student_by_teacher,
-    update_assignment
+    update_assignment, update_class_name
 )
 
 from pipeline.text_extraction import run_text_extraction
@@ -434,6 +434,21 @@ def archive_class_route(class_id):
     if not require_teacher_owns_class(class_id, user_id):
         return jsonify({"error": "Class not found"}), 404
     archive_class(class_id, user_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/classes/<int:class_id>", methods=["PATCH"])
+def update_class_route(class_id):
+    user_id, _ = current_identity()
+    if not user_id:
+        return jsonify({"error": "Not logged in"}), 401
+    if not require_teacher_owns_class(class_id, user_id):
+        return jsonify({"error": "Class not found"}), 404
+    body = request.get_json(force=True)
+    name = (body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "Class name required"}), 400
+    update_class_name(class_id, user_id, name)
     return jsonify({"ok": True})
 
 
@@ -1055,6 +1070,7 @@ def _run_pipeline(lesson_id: str, file_path: str, original_filename: str, resume
         if stage in (Status.EXTRACTING, Status.BUILDING_CURRICULUM):
             stage = Status.BUILDING_CURRICULUM
             write_meta(lesson_id, status=stage)
+            delete_quiz_questions_for_lesson(lesson_id)
             curriculum = run_curriculum_extraction(normalized, lesson_id)
             for concept in curriculum["curriculum_graph"]["concepts"]:
                 questions = generate_quiz_batch(
@@ -1201,9 +1217,10 @@ def create_lesson():
     lesson_id = new_lesson_id()
     user_id, session_id = current_identity()
 
-    existing = get_lessons_for_owner(user_id, session_id)
-    if len(existing) >= 10:
-        return jsonify({"error": "Lesson limit reached (10 max). Delete a lesson to add a new one."}), 400
+    if get_user_role(user_id) != "teacher":
+        existing = get_lessons_for_owner(user_id, session_id)
+        if len(existing) >= 10:
+            return jsonify({"error": "Lesson limit reached (10 max). Delete a lesson to add a new one."}), 400
     
     create_lesson_owner(lesson_id, session_id, user_id)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
