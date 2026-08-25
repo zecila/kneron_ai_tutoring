@@ -1018,27 +1018,88 @@ def init_tts():
     except Exception as e:
         print(f"TTS init failed: {e}")
 
+
+TTS_MAX_RETRIES = 2
+
 @app.route("/api/tts", methods=["POST"])
 @limiter.limit("120 per hour")
 def tts():
     text = request.json.get("text", "").strip()
     if not text:
         return jsonify({"error": "No text provided"}), 400
-    try:
-        r = requests.post(
-            f"{TTS_BASE}/audio/tts",
-            json={
-                "text": text,
-                "output_format": "audio",
-                "model_name": TTS_MODEL,
-                "version": TTS_VERSION
-            },
-            timeout=30
-        )
-        r.raise_for_status()
-        return Response(r.content, mimetype="audio/wav")
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    app.logger.info(f"TTS request: {len(text)} chars")
+
+    last_err = None
+    for attempt in range(TTS_MAX_RETRIES + 1):
+        try:
+            r = requests.post(
+                f"{TTS_BASE}/audio/tts",
+                json={
+                    "text": text,
+                    "output_format": "audio",
+                    "model_name": TTS_MODEL,
+                    "version": TTS_VERSION
+                },
+                timeout=30
+            )
+            r.raise_for_status()
+            return Response(r.content, mimetype="audio/wav")
+        except requests.exceptions.ChunkedEncodingError as e:
+            last_err = e
+            app.logger.warning(f"TTS attempt {attempt+1} dropped mid-stream, retrying: {e}")
+            continue
+        except requests.HTTPError as e:
+            app.logger.error(f"TTS upstream error: {e.response.status_code} - {e.response.text}")
+            return jsonify({"error": "TTS service unavailable", "upstream": e.response.text}), 502
+        except Exception as e:
+            app.logger.error(f"TTS request failed: {type(e).__name__}: {e}")
+            return jsonify({"error": str(e)}), 500
+
+    app.logger.error(f"TTS failed after {TTS_MAX_RETRIES+1} attempts: {last_err}")
+    return jsonify({"error": "TTS service unstable"}), 502
+
+
+# ── Avatar (OpenAvatarChat) LLM proxy ──────────────────────────────────────────
+# OpenAvatarChat's LLMOpenAICompatible handler talks to this route as if it were
+# an OpenAI-compatible endpoint. Lesson context is already injected client-side
+# (TutorSession.sendContext in app.js, via the resolve_lesson_access-gated
+# /tutor-context route) as the first HUMAN_TEXT message on the data channel, so
+# this route doesn't need a lesson_id — it's just a thin relay to llm_client,
+# re-streamed as SSE in the shape the OpenAI SDK expects.
+#
+# Note: OAC's handler hardcodes a 5s client timeout (see llm_handler_openai_compatible.py),
+# so the first chunk needs to land well under that.
+@app.route("/api/avatar/v1/chat/completions", methods=["POST"])
+@limiter.limit("120 per hour")
+def avatar_chat_completions():
+    body = request.get_json(force=True, silent=True) or {}
+    messages = body.get("messages")
+    if not messages:
+        return jsonify({"error": "No messages provided"}), 400
+
+    def generate():
+        try:
+            stream = llm_client.chat.completions.create(
+                model="gpt-5.4-mini",  # matches _call_tool's model id for .133:8080
+                messages=messages,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            for chunk in stream:
+                yield f"data: {chunk.model_dump_json()}\n\n"
+            yield "data: [DONE]\n\n"
+        except (InternalServerError, APIConnectionError, RateLimitError) as e:
+            app.logger.error(f"Avatar LLM proxy upstream error: {repr(e)}")
+            error_chunk = {"error": {"message": str(e), "type": "upstream_error"}}
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            app.logger.error(f"Avatar LLM proxy failed: {repr(e)}")
+            error_chunk = {"error": {"message": str(e), "type": "proxy_error"}}
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
 
 
 # ── Pipeline orchestration ─────────────────────────────────────────────────────  ← new section
@@ -1353,8 +1414,48 @@ def get_lesson_media(lesson_id, filename):
         return jsonify({"error": "Invalid path"}), 400
     return send_from_directory(base_dir, filename)
 
+# ── OpenAvatarChat  ───────────────────────────────────────────────────────────────
+@app.route("/api/lessons/<lesson_id>/tutor-context")
+@limiter.limit("20 per hour")
+def get_tutor_context(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+    try:
+        with open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8") as f:
+            concepts_data = json.load(f)["curriculum_graph"]
+        with open(lesson_path(lesson_id, "slideshow.json"), encoding="utf-8") as f:
+            slideshow_data = json.load(f)["slideshow"]
+    except (FileNotFoundError, ValueError, KeyError):
+        return jsonify({"error": "Lesson not found or not finished generating."}), 404
+    except json.JSONDecodeError as e:
+        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 500
+
+    parts = []
+    for c in concepts_data.get("concepts", []):
+        block = f"## {c.get('name', '')}\n{c.get('description', '')}"
+        terms = c.get("study", {}).get("key_terms", [])
+        if terms:
+            block += "\n" + "\n".join(f"- {t['term']}: {t['definition']}" for t in terms)
+        parts.append(block)
+
+    equations = [
+        el["content"]
+        for s in slideshow_data.get("slides", [])
+        for el in s.get("body", [])
+        if el.get("type") == "equation" and el.get("content")
+    ]
+    if equations:
+        parts.append("## Equations\n" + "\n".join(f"- {eq}" for eq in equations))
+
+    context_text = "\n\n".join(parts)
+    assignment = get_assignment_for_lesson(lesson_id)
+    course_name = assignment.get("title") if assignment and assignment.get("title") else concepts_data.get("course", "Untitled course")
+
+    return jsonify({"course": course_name, "context": context_text})
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
         init_tts()
-    app.run(debug=True, port=5000, threaded=True)
+    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True)

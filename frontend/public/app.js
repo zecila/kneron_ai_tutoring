@@ -797,6 +797,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 function enterLesson(id) {
   lessonId = id;
   document.getElementById("class-detail-screen").classList.add("hidden");
+  document.getElementById("tutor-chat-messages").innerHTML = "";
   const scene = new URLSearchParams(window.location.search).get("scene");
   history.replaceState(null, "", scene ? `?lesson=${id}&scene=${scene}` : `?lesson=${id}`);
   showScreen("loading");
@@ -2323,6 +2324,8 @@ function fitSlideToStage() {
   const stageW  = stage.clientWidth  - 48; // 24px padding each side
   const stageH  = stage.clientHeight - padH;
 
+  if (stageW <= 0 || stageH <= 0) return; // stage not laid out yet (still hidden). bail, caller will re-trigger once visible
+
   const scaleByW = stageW / slideW;
   const scaleByH = stageH / slideH;
   const scale    = Math.min(1, scaleByW, scaleByH);
@@ -2358,9 +2361,64 @@ function toggleSidebar() {
   setTimeout(fitSlideToStage, 220);
 }
 
+// ─── Tutor session (OpenAvatarChat data channel) ───────────────────────────────
+// TutorSession wraps the WebRTC data channel. Right now `channel` stays null
+// (no live OpenAvatarChat instance to connect to), so send() just logs the
+// payload it *would* have sent — this lets us build/test injection and
+// suppression logic without a running server. Swap `connect()`'s body for
+// real RTCPeerConnection setup once the machine's back.
+const TutorSession = {
+  channel: null,
+  contextSent: false,
+
+  async connect() {
+    // TODO: open RTCPeerConnection to OpenAvatarChat instance, assign
+    // this.channel = peerConnection.createDataChannel(...) once live.
+    this.contextSent = false;
+  },
+
+  _send(text, { silent = false } = {}) {
+    const payload = {
+      header: { name: "SendHumanText", request_id: crypto.randomUUID() },
+      payload: {
+        request_id: crypto.randomUUID(),
+        stream_key: crypto.randomUUID(),
+        mode: "full_text",
+        text,
+        end_of_speech: true,
+      },
+    };
+    if (this.channel && this.channel.readyState === "open") {
+      this.channel.send(JSON.stringify(payload));
+    } else {
+      console.log(`[TutorSession] (no live channel, would send${silent ? ", silent" : ""}):`, payload);
+    }
+    return payload;
+  },
+
+  // Called once per lesson-open, before the panel accepts user input.
+  async sendContext(lessonId) {
+    if (this.contextSent) return;
+    const res = await fetch(`/api/lessons/${lessonId}/tutor-context`);
+    if (!res.ok) return;
+    const { context } = await res.json();
+    this._send(context, { silent: true }); // silent: suppressed from visible chat
+    this.contextSent = true;
+  },
+
+  sendMessage(text) {
+    return this._send(text);
+  },
+};
+
 // ─── Chatbot toggle ───────────────────────────────────────────────────────────
 function toggleTutorChat() {
-  document.getElementById("tutor-chat-panel").classList.toggle("hidden");
+  const panel = document.getElementById("tutor-chat-panel");
+  const wasHidden = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden");
+  if (wasHidden && lessonId) {
+    TutorSession.connect().then(() => TutorSession.sendContext(lessonId));
+  }
 }
 
 function sendTutorChatMessage() {
@@ -2374,6 +2432,7 @@ function sendTutorChatMessage() {
   messages.appendChild(bubble);
   messages.scrollTop = messages.scrollHeight;
   input.value = "";
+  TutorSession.sendMessage(text); // visible bubble is separate from the wire payload — no suppression needed here
 }
 
 document.getElementById("tutor-chat-toggle").addEventListener("click", toggleTutorChat);
@@ -2484,6 +2543,8 @@ function navigate(dir) {
 }
 
 function handleKeyboard(e) {
+  const tag = document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement.isContentEditable) return;
   if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " ") navigate(1);
   if (e.key === "ArrowLeft" || e.key === "ArrowUp") navigate(-1);
 }
