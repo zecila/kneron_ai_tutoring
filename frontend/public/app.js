@@ -2382,7 +2382,8 @@ const TutorSession = {
   connectingPromise: null,
   disconnecting: false,
   connectionAttempt: 0,
-  contextSent: false,
+  conversationLessonId: null,
+  conversation: [],
 
   async connect(activeLessonId) {
     if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
@@ -2465,7 +2466,6 @@ const TutorSession = {
       throw new Error("Tutor connection was closed.");
     }
     this.sessionId = String(answer.sessionid);
-    this.contextSent = false;
     return this.sessionId;
   },
 
@@ -2525,18 +2525,11 @@ const TutorSession = {
       this.peerConnection = null;
       this.sessionId = null;
       this.activeLessonId = null;
-      this.contextSent = false;
     } catch (err) {
       console.warn("[TutorSession] disconnect cleanup failed:", err);
     } finally {
       this.disconnecting = false;
     }
-  },
-
-  _send(text, { silent = false } = {}) {
-    const payload = { text, silent };
-    console.log("[TutorSession] LiveTalking text delivery is not connected yet:", payload);
-    return payload;
   },
 
   async _speakEcho(text, { interrupt = true } = {}) {
@@ -2563,17 +2556,65 @@ const TutorSession = {
     return data;
   },
 
-  // Called once per lesson-open, before the panel accepts user input.
-  async sendContext(lessonId) {
-    if (this.contextSent) return;
-    const res = await fetch(`/api/lessons/${lessonId}/tutor-context`);
-    if (!res.ok) return;
-    const { context } = await res.json();
-    this._send(context, { silent: true }); // silent: suppressed from visible chat
-    this.contextSent = true;
+  _getContextLocation() {
+    const studyVisible = !document.getElementById("study").classList.contains("hidden");
+    const scene = studyVisible ? "study" : "slideshow";
+    const selectedStudyConcept =
+      scene === "study" && activeConceptId && !activeConceptId.startsWith("__")
+        ? activeConceptId
+        : null;
+    return {
+      scene,
+      current_slide_index: scene === "slideshow" && Number.isInteger(current) ? current : null,
+      active_concept_id: selectedStudyConcept,
+    };
+  },
+
+  async _requestTutorReply(activeLessonId, text) {
+    if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
+    if (this.conversationLessonId !== activeLessonId) {
+      this.clearConversation();
+      this.conversationLessonId = activeLessonId;
+    }
+
+    const res = await fetch(`/api/lessons/${encodeURIComponent(activeLessonId)}/tutor/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        history: this.conversation.slice(-12),
+        ...this._getContextLocation(),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || typeof data.reply !== "string" || !data.reply.trim()) {
+      throw new Error(data.error || "Tutor response request failed.");
+    }
+    if (lessonId !== activeLessonId || this.conversationLessonId !== activeLessonId) {
+      throw new Error("Tutor response belongs to a lesson that is no longer active.");
+    }
+
+    const reply = data.reply.trim();
+    this.conversation.push(
+      { role: "user", content: text },
+      { role: "assistant", content: reply }
+    );
+    if (this.conversation.length > 24) {
+      this.conversation.splice(0, this.conversation.length - 24);
+    }
+    return reply;
+  },
+
+  clearConversation() {
+    this.conversationLessonId = null;
+    this.conversation = [];
   },
 
   async sendMessage(text) {
+    return this._requestTutorReply(lessonId, text);
+  },
+
+  async speakMessage(text) {
     if (this.activeLessonId !== lessonId || !this.sessionId) {
       await this.connect(lessonId);
     }
@@ -2700,6 +2741,7 @@ function setTutorWidgetVisible(visible) {
   document.getElementById("tutor-chat-messages").replaceChildren();
   document.getElementById("tutor-chat-input").value = "";
   resetTutorAvatarSize();
+  TutorSession.clearConversation();
   TutorSession.disconnect();
 }
 
@@ -2806,16 +2848,32 @@ async function sendTutorChatMessage() {
   input.disabled = true;
   sendButton.disabled = true;
   appendTutorChatBubble(text, "tutor-chat-bubble-user");
+  const pendingReply = appendTutorChatBubble("Thinking...", "tutor-chat-bubble-agent");
+  const avatarReady = ensureTutorSessionConnected().then(
+    () => null,
+    (error) => error
+  );
+  let replyGenerated = false;
   try {
-    await ensureTutorSessionConnected();
-    await TutorSession.sendMessage(text);
-    appendTutorChatBubble(text, "tutor-chat-bubble-agent");
+    const reply = await TutorSession.sendMessage(text);
+    replyGenerated = true;
+    pendingReply.textContent = reply;
+    scheduleTutorAvatarSizeUpdate();
+
+    const connectionError = await avatarReady;
+    if (connectionError) throw connectionError;
+    await TutorSession.speakMessage(reply);
   } catch (err) {
     console.error("[TutorSession] message send failed:", err);
-    appendTutorChatBubble(
-      "Avatar speech failed. Check that LiveTalking is running, then try again.",
-      "tutor-chat-bubble-agent tutor-chat-bubble-error"
-    );
+    if (replyGenerated) {
+      appendTutorChatBubble(
+        "The response was generated, but avatar speech failed. Check that LiveTalking is running.",
+        "tutor-chat-bubble-agent tutor-chat-bubble-error"
+      );
+    } else {
+      pendingReply.textContent = "I couldn't generate a tutor response. Please try again.";
+      pendingReply.classList.add("tutor-chat-bubble-error");
+    }
   } finally {
     input.disabled = false;
     sendButton.disabled = false;

@@ -3159,6 +3159,8 @@ html, body {
   padding: 8px 12px;
   border-radius: var(--radius);
   max-width: 80%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-wrap: break-word;
 }
 

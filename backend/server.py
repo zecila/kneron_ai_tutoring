@@ -1493,6 +1493,28 @@ LIVETALKING_BASE_URL = os.environ.get("LIVETALKING_BASE_URL", "http://127.0.0.1:
 LIVETALKING_SIGNALING_TIMEOUT = int(os.environ.get("LIVETALKING_SIGNALING_TIMEOUT", "60"))
 LIVETALKING_COMMAND_TIMEOUT = int(os.environ.get("LIVETALKING_COMMAND_TIMEOUT", "15"))
 LIVETALKING_MAX_TEXT_LENGTH = 2000
+TUTOR_CHAT_MODEL = os.environ.get("TUTOR_CHAT_MODEL", "gpt-5.4-mini")
+TUTOR_CHAT_HISTORY_LIMIT = 12
+TUTOR_CHAT_HISTORY_MAX_LENGTH = 12000
+TUTOR_CONTEXT_CONCEPT_LIMIT = 5
+TUTOR_CHAT_SYSTEM_PROMPT = (
+    "You are the tutoring agent for the learner's current lesson. Ground answers in the supplied lesson "
+    "context and prioritize the current slide or active study concept when the learner uses words like "
+    "this, that, here, or it. For broader questions, connect the answer to the most relevant concepts in "
+    "the lesson. You may use general knowledge to clarify the lesson, but do not contradict its material "
+    "or invent lesson-specific details. If the available context is insufficient, say so and ask a brief "
+    "clarifying question. Respond clearly and concisely in plain text that sounds natural when spoken aloud. "
+    "Use short sentences and brief paragraphs. Do not use Markdown, bullet points, numbered lists, headings, "
+    "tables, or list-marker hyphens. When listing several items, write them as natural prose using commas and "
+    "conjunctions."
+)
+TUTOR_CONTEXT_STOP_WORDS = {
+    "about", "after", "again", "also", "and", "are", "because", "been", "before", "being", "can",
+    "could", "does", "explain", "from", "have", "help", "here", "how", "into", "just", "lesson", "mean",
+    "means", "more", "most", "question", "that", "the", "their", "then", "there", "these", "they",
+    "this", "those", "topic", "understand", "what", "when", "where", "which", "why", "with", "work", "works",
+    "would", "you", "your",
+}
 
 
 @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
@@ -1527,6 +1549,362 @@ def avatar_webrtc_offer(lesson_id):
     )
 
 
+def _tutor_context_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _tutor_context_terms(value):
+    return {
+        term
+        for term in re.findall(r"[a-z0-9]+", _tutor_context_text(value).lower())
+        if len(term) > 2 and term not in TUTOR_CONTEXT_STOP_WORDS
+    }
+
+
+def _tutor_concept_score(concept, question):
+    question_text = question.lower()
+    question_terms = _tutor_context_terms(question)
+    if not question_terms:
+        return 0
+
+    name = _tutor_context_text(concept.get("name"))
+    description = _tutor_context_text(concept.get("description"))
+    study = concept.get("study") or {}
+    key_terms = study.get("key_terms") or []
+    formulas = study.get("formulas") or []
+    flashcards = study.get("flashcards") or []
+
+    score = 0
+    if name and name.lower() in question_text:
+        score += 20
+    score += 5 * len(question_terms & _tutor_context_terms(name))
+    score += 2 * len(question_terms & _tutor_context_terms(description))
+
+    for item in key_terms:
+        term = _tutor_context_text(item.get("term"))
+        if term and term.lower() in question_text:
+            score += 12
+        score += 4 * len(question_terms & _tutor_context_terms(term))
+        score += len(question_terms & _tutor_context_terms(item.get("definition")))
+
+    supporting_text = [
+        *(_tutor_context_text(item.get("latex")) + " " + _tutor_context_text(item.get("explanation")) for item in formulas),
+        *(_tutor_context_text(item.get("front")) + " " + _tutor_context_text(item.get("back")) for item in flashcards),
+    ]
+    score += len(question_terms & _tutor_context_terms(" ".join(supporting_text)))
+    return score
+
+
+def _format_tutor_concept(concept):
+    lines = [f"## {_tutor_context_text(concept.get('name'))}"]
+    description = _tutor_context_text(concept.get("description"))
+    if description:
+        lines.append(description)
+
+    study = concept.get("study") or {}
+    key_terms = study.get("key_terms") or []
+    if key_terms:
+        lines.append("Key terms:")
+        lines.extend(
+            f"- {_tutor_context_text(item.get('term'))}: {_tutor_context_text(item.get('definition'))}"
+            for item in key_terms
+        )
+
+    formulas = study.get("formulas") or []
+    if formulas:
+        lines.append("Formulas:")
+        lines.extend(
+            f"- {_tutor_context_text(item.get('latex'))}: {_tutor_context_text(item.get('explanation'))}"
+            for item in formulas
+        )
+
+    flashcards = study.get("flashcards") or []
+    if flashcards:
+        lines.append("Study checks:")
+        lines.extend(
+            f"- Q: {_tutor_context_text(item.get('front'))} A: {_tutor_context_text(item.get('back'))}"
+            for item in flashcards
+        )
+
+    return "\n".join(lines)
+
+
+def _build_tutor_lesson_context(lesson_id, question, current_slide_index=None, active_concept_id=None, scene=None):
+    with open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8") as f:
+        curriculum = json.load(f)["curriculum_graph"]
+    with open(lesson_path(lesson_id, "slideshow.json"), encoding="utf-8") as f:
+        slideshow = json.load(f)["slideshow"]
+
+    concepts = curriculum.get("concepts") or []
+    slides = slideshow.get("slides") or []
+    concept_lookup = {
+        concept.get("concept_id"): concept
+        for concept in concepts
+        if concept.get("concept_id")
+    }
+
+    current_slide = None
+    if current_slide_index is not None:
+        if current_slide_index < 0 or current_slide_index >= len(slides):
+            raise IndexError("Current slide is out of range")
+        current_slide = slides[current_slide_index]
+
+    selected_ids = []
+    if active_concept_id in concept_lookup:
+        selected_ids.append(active_concept_id)
+
+    slide_concept_ids = []
+    if current_slide:
+        for concept_id in current_slide.get("concept_ids") or []:
+            if concept_id in concept_lookup and concept_id not in selected_ids and concept_id not in slide_concept_ids:
+                slide_concept_ids.append(concept_id)
+
+    available_slots = TUTOR_CONTEXT_CONCEPT_LIMIT - len(selected_ids)
+    if len(slide_concept_ids) <= available_slots:
+        selected_ids.extend(slide_concept_ids)
+    else:
+        ranked_slide_concepts = sorted(
+            (_tutor_concept_score(concept_lookup[concept_id], question), concept_id)
+            for concept_id in slide_concept_ids
+        )
+        for score, concept_id in reversed(ranked_slide_concepts):
+            if score <= 0 or len(selected_ids) >= TUTOR_CONTEXT_CONCEPT_LIMIT:
+                break
+            selected_ids.append(concept_id)
+
+    ranked_concepts = sorted(
+        (
+            (_tutor_concept_score(concept, question), concept.get("concept_id"))
+            for concept in concepts
+            if concept.get("concept_id") and concept.get("concept_id") not in selected_ids
+        ),
+        reverse=True,
+    )
+    for score, concept_id in ranked_concepts:
+        if score <= 0 or len(selected_ids) >= TUTOR_CONTEXT_CONCEPT_LIMIT:
+            break
+        selected_ids.append(concept_id)
+
+    assignment = get_assignment_for_lesson(lesson_id)
+    course_name = (
+        assignment.get("title")
+        if assignment and assignment.get("title")
+        else curriculum.get("course", "Untitled course")
+    )
+    parts = [
+        "# Lesson overview",
+        f"Course: {course_name}",
+        "Concept map: " + "; ".join(
+            f"{concept.get('concept_id')}: {_tutor_context_text(concept.get('name'))}"
+            for concept in concepts
+        ),
+    ]
+
+    location_lines = ["# Student location"]
+    if scene in {"slideshow", "study"}:
+        location_lines.append(f"View: {scene}")
+    if current_slide:
+        location_lines.extend([
+            f"Current slide: {current_slide_index + 1} of {len(slides)}",
+            f"Title: {_tutor_context_text(current_slide.get('title'))}",
+            f"Type: {_tutor_context_text(current_slide.get('type'))}",
+        ])
+        body = current_slide.get("body") or []
+        if body:
+            location_lines.append("Visible slide content:")
+            for item in body:
+                item_type = _tutor_context_text(item.get("type")) or "content"
+                content = _tutor_context_text(item.get("content"))
+                if content:
+                    location_lines.append(f"- [{item_type}] {content}")
+        speaker_notes = _tutor_context_text(current_slide.get("speaker_notes"))
+        if speaker_notes:
+            location_lines.append(f"Speaker notes: {speaker_notes}")
+    if active_concept_id in concept_lookup:
+        location_lines.append(
+            "Active study concept: " + _tutor_context_text(concept_lookup[active_concept_id].get("name"))
+        )
+    parts.append("\n".join(location_lines))
+
+    if selected_ids:
+        parts.append(
+            "# Detailed relevant concepts\n" + "\n\n".join(
+                _format_tutor_concept(concept_lookup[concept_id])
+                for concept_id in selected_ids
+            )
+        )
+
+    return "\n\n".join(parts)
+
+
+@app.route("/api/lessons/<lesson_id>/tutor/message", methods=["POST"])
+@limiter.limit("120 per hour")
+def tutor_message(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return jsonify({"error": "No message provided"}), 400
+    message = message.strip()
+    if len(message) > LIVETALKING_MAX_TEXT_LENGTH:
+        return jsonify({"error": f"Message must be {LIVETALKING_MAX_TEXT_LENGTH} characters or fewer"}), 400
+
+    history = body.get("history", [])
+    if not isinstance(history, list) or len(history) > 50:
+        return jsonify({"error": "Invalid conversation history"}), 400
+
+    normalized_history = []
+    history_length = 0
+    for item in history[-TUTOR_CHAT_HISTORY_LIMIT:]:
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            return jsonify({"error": "Invalid conversation history"}), 400
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return jsonify({"error": "Invalid conversation history"}), 400
+        content = content.strip()
+        if len(content) > LIVETALKING_MAX_TEXT_LENGTH:
+            return jsonify({"error": "Conversation message is too long"}), 400
+        history_length += len(content)
+        normalized_history.append({"role": item["role"], "content": content})
+
+    if history_length > TUTOR_CHAT_HISTORY_MAX_LENGTH:
+        return jsonify({"error": "Conversation history is too long"}), 400
+
+    current_slide_index = body.get("current_slide_index")
+    if current_slide_index is not None and (
+        isinstance(current_slide_index, bool) or not isinstance(current_slide_index, int)
+    ):
+        return jsonify({"error": "Invalid current slide index"}), 400
+
+    active_concept_id = body.get("active_concept_id")
+    if active_concept_id is not None and (
+        not isinstance(active_concept_id, str) or len(active_concept_id) > 128
+    ):
+        return jsonify({"error": "Invalid active concept ID"}), 400
+
+    scene = body.get("scene")
+    if scene is not None and scene not in {"slideshow", "study"}:
+        return jsonify({"error": "Invalid lesson view"}), 400
+
+    try:
+        lesson_context = _build_tutor_lesson_context(
+            lesson_id,
+            message,
+            current_slide_index=current_slide_index,
+            active_concept_id=active_concept_id,
+            scene=scene,
+        )
+    except (FileNotFoundError, KeyError, IndexError):
+        return jsonify({"error": "Lesson context is unavailable"}), 404
+    except (json.JSONDecodeError, ValueError) as e:
+        app.logger.error(f"Tutor lesson context is invalid: {e}")
+        return jsonify({"error": "Lesson context is invalid"}), 500
+
+    try:
+        completion = llm_client.chat.completions.create(
+            model=TUTOR_CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": TUTOR_CHAT_SYSTEM_PROMPT},
+                {"role": "system", "content": "LESSON CONTEXT\n" + lesson_context},
+                *normalized_history,
+                {"role": "user", "content": message},
+            ],
+            max_tokens=500,
+        )
+        reply = completion.choices[0].message.content
+    except (InternalServerError, APIConnectionError, RateLimitError) as e:
+        app.logger.error(f"Tutor LLM upstream error: {type(e).__name__}: {e}")
+        return jsonify({"error": "Tutor response service unavailable"}), 502
+    except Exception as e:
+        app.logger.exception(f"Tutor LLM request failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "Tutor response could not be generated"}), 502
+
+    if not isinstance(reply, str) or not reply.strip():
+        app.logger.error("Tutor LLM returned an empty response")
+        return jsonify({"error": "Tutor response was empty"}), 502
+
+    reply = reply.strip()
+    if len(reply) > LIVETALKING_MAX_TEXT_LENGTH:
+        reply = reply[:LIVETALKING_MAX_TEXT_LENGTH - 3].rsplit(" ", 1)[0].rstrip() + "..."
+
+    return jsonify({"reply": reply})
+
+
+TUTOR_SPEECH_UNITS = {
+    "mm": "millimeters",
+    "cm": "centimeters",
+    "m": "meters",
+    "km": "kilometers",
+    "in": "inches",
+    "ft": "feet",
+    "yd": "yards",
+    "mi": "miles",
+}
+TUTOR_SPEECH_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
+
+
+def _normalize_tutor_speech_text(text):
+    def replace_unit_power(match):
+        power = match.group("power") or match.group("power_unicode")
+        dimension = "square" if power in {"2", "²"} else "cubic"
+        return f"{dimension} {TUTOR_SPEECH_UNITS[match.group('unit')]}"
+
+    def replace_superscript(match):
+        superscript = match.group(0)
+        if superscript == "²":
+            return " squared"
+        if superscript == "³":
+            return " cubed"
+        exponent = superscript.translate(TUTOR_SPEECH_SUPERSCRIPT_DIGITS)
+        if exponent.startswith("-"):
+            exponent = "negative " + exponent[1:]
+        return " to the power of " + exponent
+
+    speech = re.sub(
+        r"\b(?P<unit>mm|cm|km|m|in|ft|yd|mi)\s*(?:\^(?:\{)?(?P<power>2|3)(?:\})?|(?P<power_unicode>[²³]))",
+        replace_unit_power,
+        text,
+    )
+    speech = re.sub(r"\^\s*(?:\{\s*)?2\s*(?:\})?", " squared", speech)
+    speech = re.sub(r"\^\s*(?:\{\s*)?3\s*(?:\})?", " cubed", speech)
+    speech = re.sub(
+        r"\^\s*(?:\{\s*)?(-?\d+)\s*(?:\})?",
+        lambda match: f" to the power of {match.group(1)}",
+        speech,
+    )
+    speech = re.sub(
+        r"[⁰¹²³⁴⁵⁶⁷⁸⁹⁻]+",
+        replace_superscript,
+        speech,
+    )
+    speech = speech.replace("°C", " degrees Celsius").replace("°F", " degrees Fahrenheit")
+    speech = speech.replace("°", " degrees")
+    for symbol, spoken in {
+        "×": " times ",
+        "÷": " divided by ",
+        "≠": " does not equal ",
+        "≤": " is less than or equal to ",
+        "≥": " is greater than or equal to ",
+        "=": " equals ",
+        "%": " percent",
+    }.items():
+        speech = speech.replace(symbol, spoken)
+    speech = re.sub(r"[ \t]+", " ", speech)
+    speech = re.sub(r"\s*\n+\s*", ". ", speech)
+    speech = re.sub(r"\s+([,.;:!?])", r"\1", speech)
+    return speech.strip()
+
+
 @app.route("/api/lessons/<lesson_id>/avatar/speak", methods=["POST"])
 @limiter.limit("120 per hour")
 def avatar_speak(lesson_id):
@@ -1548,6 +1926,9 @@ def avatar_speak(lesson_id):
     text = text.strip()
     if len(text) > LIVETALKING_MAX_TEXT_LENGTH:
         return jsonify({"error": f"Text must be {LIVETALKING_MAX_TEXT_LENGTH} characters or fewer"}), 400
+    speech_text = _normalize_tutor_speech_text(text)
+    if len(speech_text) > LIVETALKING_MAX_TEXT_LENGTH:
+        speech_text = speech_text[:LIVETALKING_MAX_TEXT_LENGTH - 3].rsplit(" ", 1)[0].rstrip() + "..."
 
     interrupt = body.get("interrupt", True)
     if not isinstance(interrupt, bool):
@@ -1559,7 +1940,7 @@ def avatar_speak(lesson_id):
             json={
                 "sessionid": avatar_session_id,
                 "type": "echo",
-                "text": text,
+                "text": speech_text,
                 "interrupt": interrupt,
             },
             timeout=LIVETALKING_COMMAND_TIMEOUT,
@@ -1579,45 +1960,6 @@ def avatar_speak(lesson_id):
         return jsonify({"error": message}), 502
 
     return jsonify({"ok": True})
-
-@app.route("/api/lessons/<lesson_id>/tutor-context")
-@limiter.limit("20 per hour")
-def get_tutor_context(lesson_id):
-    user_id, session_id = current_identity()
-    if not resolve_lesson_access(lesson_id, user_id, session_id):
-        return jsonify({"error": "Lesson not found"}), 404
-    try:
-        with open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8") as f:
-            concepts_data = json.load(f)["curriculum_graph"]
-        with open(lesson_path(lesson_id, "slideshow.json"), encoding="utf-8") as f:
-            slideshow_data = json.load(f)["slideshow"]
-    except (FileNotFoundError, ValueError, KeyError):
-        return jsonify({"error": "Lesson not found or not finished generating."}), 404
-    except json.JSONDecodeError as e:
-        return jsonify({"error": f"Invalid JSON: {str(e)}"}), 500
-
-    parts = []
-    for c in concepts_data.get("concepts", []):
-        block = f"## {c.get('name', '')}\n{c.get('description', '')}"
-        terms = c.get("study", {}).get("key_terms", [])
-        if terms:
-            block += "\n" + "\n".join(f"- {t['term']}: {t['definition']}" for t in terms)
-        parts.append(block)
-
-    equations = [
-        el["content"]
-        for s in slideshow_data.get("slides", [])
-        for el in s.get("body", [])
-        if el.get("type") == "equation" and el.get("content")
-    ]
-    if equations:
-        parts.append("## Equations\n" + "\n".join(f"- {eq}" for eq in equations))
-
-    context_text = "\n\n".join(parts)
-    assignment = get_assignment_for_lesson(lesson_id)
-    course_name = assignment.get("title") if assignment and assignment.get("title") else concepts_data.get("course", "Untitled course")
-
-    return jsonify({"course": course_name, "context": context_text})
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
