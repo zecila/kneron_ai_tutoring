@@ -3121,6 +3121,13 @@ html, body {
   border-bottom: 1px solid var(--border);
 }
 
+#tutor-chat-avatar-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
 #tutor-chat-messages {
   flex: 1;
   overflow-y: auto;
@@ -3132,14 +3139,27 @@ html, body {
   gap: 8px;
 }
 
-.tutor-chat-bubble-user {
-  align-self: flex-end;
-  background: var(--accent);
-  color: #fff;
+.tutor-chat-bubble {
   padding: 8px 12px;
   border-radius: var(--radius);
   max-width: 80%;
   word-wrap: break-word;
+}
+
+.tutor-chat-bubble-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+}
+
+.tutor-chat-bubble-agent {
+  align-self: flex-start;
+  background: var(--surface-alt, #f3f4f6);
+  color: var(--text);
+}
+
+.tutor-chat-bubble-error {
+  border: 1px solid #f59e0b;
 }
 
 #tutor-chat-input-row {

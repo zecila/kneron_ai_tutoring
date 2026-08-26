@@ -7,7 +7,11 @@ services:
       - "5000:5000"
     env_file:
       - ./backend/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
+      - OPENAVATARCHAT_BASE_URL=https://host.docker.internal:8283
+      - OPENAVATARCHAT_VERIFY_TLS=false
       - MANIM_MCP_URL=http://manim-agent:8000/mcp/
       - MANIM_DOWNLOAD_URL=http://manim-agent:8000/download
       - REDIS_URL=redis://redis:6379

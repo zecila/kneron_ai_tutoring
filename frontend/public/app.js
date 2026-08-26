@@ -2362,19 +2362,223 @@ function toggleSidebar() {
 }
 
 // ─── Tutor session (OpenAvatarChat data channel) ───────────────────────────────
-// TutorSession wraps the WebRTC data channel. Right now `channel` stays null
-// (no live OpenAvatarChat instance to connect to), so send() just logs the
-// payload it *would* have sent — this lets us build/test injection and
-// suppression logic without a running server. Swap `connect()`'s body for
-// real RTCPeerConnection setup once the machine's back.
 const TutorSession = {
+  peerConnection: null,
   channel: null,
+  webrtcId: null,
+  remoteStream: null,
+  syntheticStream: null,
+  syntheticVideoTimer: null,
+  audioContext: null,
+  connectingPromise: null,
+  disconnecting: false,
+  offerAccepted: false,
+  pendingIceCandidates: [],
   contextSent: false,
 
-  async connect() {
-    // TODO: open RTCPeerConnection to OpenAvatarChat instance, assign
-    // this.channel = peerConnection.createDataChannel(...) once live.
+  async connect(activeLessonId) {
+    if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
+    if (this.channel?.readyState === "open" && this.peerConnection?.connectionState !== "closed") {
+      return;
+    }
+    if (this.connectingPromise) return this.connectingPromise;
+
+    this.connectingPromise = this._connect(activeLessonId).finally(() => {
+      this.connectingPromise = null;
+    });
+    return this.connectingPromise;
+  },
+
+  async _connect(activeLessonId) {
+    this.disconnect();
+
+    const videoEl = document.getElementById("tutor-chat-avatar-video");
+    if (!videoEl) throw new Error("Tutor avatar video element is missing.");
+
+    const pc = new RTCPeerConnection();
+    const webrtcId = crypto.randomUUID();
+    const signal = (body) => this._signal(activeLessonId, body);
+
+    this.peerConnection = pc;
+    this.webrtcId = webrtcId;
+    this.offerAccepted = false;
+    this.pendingIceCandidates = [];
+    this.remoteStream = new MediaStream();
+    videoEl.srcObject = this.remoteStream;
+
+    pc.addEventListener("track", (event) => {
+      const [stream] = event.streams;
+      if (stream) {
+        videoEl.srcObject = stream;
+      } else {
+        this.remoteStream.addTrack(event.track);
+        videoEl.srcObject = this.remoteStream;
+      }
+      videoEl.play().catch((err) => console.debug("Tutor avatar autoplay deferred:", err));
+    });
+
+    pc.addEventListener("connectionstatechange", () => {
+      console.debug("[TutorSession] peer connection:", pc.connectionState);
+      if (pc !== this.peerConnection) return;
+      if (["failed", "closed"].includes(pc.connectionState)) {
+        this.disconnect();
+      }
+    });
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (!candidate) return;
+      const iceMessage = {
+        candidate: candidate.toJSON(),
+        webrtc_id: webrtcId,
+        type: "ice-candidate",
+      };
+      if (!this.offerAccepted) {
+        this.pendingIceCandidates.push(iceMessage);
+        return;
+      }
+      signal(iceMessage).catch((err) => console.warn("[TutorSession] ICE candidate relay failed:", err));
+    };
+
+    this.channel = pc.createDataChannel("text");
+    this.channel.onmessage = (event) => {
+      console.debug("[TutorSession] data channel message:", event.data);
+    };
+
+    this.syntheticStream = this._createSyntheticInputStream();
+    if (this.audioContext?.state === "suspended") {
+      await this.audioContext.resume().catch((err) => console.debug("Tutor synthetic audio resume deferred:", err));
+    }
+    this.syntheticStream.getTracks().forEach((track) => pc.addTrack(track, this.syntheticStream));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const answer = await signal({
+      sdp: offer.sdp,
+      type: offer.type,
+      webrtc_id: webrtcId,
+    });
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+    await pc.setRemoteDescription(answer);
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+    this.offerAccepted = true;
+    await Promise.all(
+      this.pendingIceCandidates.splice(0).map((candidate) =>
+        signal(candidate).catch((err) => console.warn("[TutorSession] ICE candidate relay failed:", err))
+      )
+    );
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+    await this._waitForChannelOpen();
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+    await this._delay(750);
     this.contextSent = false;
+  },
+
+  async _signal(activeLessonId, body) {
+    const res = await fetch(`/api/lessons/${encodeURIComponent(activeLessonId)}/avatar/webrtc/offer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status === "failed") {
+      throw new Error(data.error || data.meta?.error || "OpenAvatarChat signaling failed.");
+    }
+    return data;
+  },
+
+  _waitForChannelOpen() {
+    if (this.channel?.readyState === "open") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error("Timed out waiting for tutor data channel."));
+      }, 15000);
+
+      this.channel.onopen = () => {
+        clearTimeout(timeout);
+        console.debug("[TutorSession] data channel open");
+        resolve();
+      };
+      this.channel.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error("Tutor data channel failed to open."));
+      };
+    });
+  },
+
+  _delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  },
+
+  _createSyntheticInputStream() {
+    const stream = new MediaStream();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 640;
+    canvas.height = 360;
+    const ctx = canvas.getContext("2d");
+    const drawFrame = () => {
+      ctx.fillStyle = "#111827";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    };
+    drawFrame();
+    this.syntheticVideoTimer = setInterval(drawFrame, 1000);
+    const [videoTrack] = canvas.captureStream(5).getVideoTracks();
+    if (videoTrack) stream.addTrack(videoTrack);
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextCtor) {
+      this.audioContext = new AudioContextCtor();
+      const oscillator = this.audioContext.createOscillator();
+      const gain = this.audioContext.createGain();
+      const destination = this.audioContext.createMediaStreamDestination();
+      gain.gain.value = 0;
+      oscillator.connect(gain);
+      gain.connect(destination);
+      oscillator.start();
+      const [audioTrack] = destination.stream.getAudioTracks();
+      if (audioTrack) stream.addTrack(audioTrack);
+    }
+
+    return stream;
+  },
+
+  disconnect() {
+    if (this.disconnecting) return;
+    this.disconnecting = true;
+    const videoEl = document.getElementById("tutor-chat-avatar-video");
+    try {
+      if (videoEl) videoEl.srcObject = null;
+      if (this.syntheticVideoTimer) {
+        clearInterval(this.syntheticVideoTimer);
+        this.syntheticVideoTimer = null;
+      }
+      this.syntheticStream?.getTracks().forEach((track) => track.stop());
+      this.syntheticStream = null;
+      this.remoteStream?.getTracks().forEach((track) => track.stop());
+      this.remoteStream = null;
+      this.channel?.close();
+      this.channel = null;
+      this.peerConnection?.getSenders().forEach((sender) => sender.track?.stop());
+      this.peerConnection?.close();
+      this.peerConnection = null;
+      this.webrtcId = null;
+      this.offerAccepted = false;
+      this.pendingIceCandidates = [];
+      this.audioContext?.close?.().catch?.((err) => console.debug("Tutor synthetic audio close failed:", err));
+      this.audioContext = null;
+    } catch (err) {
+      console.warn("[TutorSession] disconnect cleanup failed:", err);
+    } finally {
+      this.disconnecting = false;
+    }
   },
 
   _send(text, { silent = false } = {}) {
@@ -2406,33 +2610,58 @@ const TutorSession = {
     this.contextSent = true;
   },
 
-  sendMessage(text) {
+  async sendMessage(text) {
+    if (this.channel?.readyState !== "open") {
+      await this.connect(lessonId);
+    }
     return this._send(text);
   },
 };
+
+function appendTutorChatBubble(text, className) {
+  const messages = document.getElementById("tutor-chat-messages");
+  const bubble = document.createElement("div");
+  bubble.className = `tutor-chat-bubble ${className}`;
+  bubble.textContent = text;
+  messages.appendChild(bubble);
+  messages.scrollTop = messages.scrollHeight;
+  return bubble;
+}
 
 // ─── Chatbot toggle ───────────────────────────────────────────────────────────
 function toggleTutorChat() {
   const panel = document.getElementById("tutor-chat-panel");
   const wasHidden = panel.classList.contains("hidden");
   panel.classList.toggle("hidden");
+  if (!wasHidden) {
+    TutorSession.disconnect();
+    return;
+  }
   if (wasHidden && lessonId) {
-    TutorSession.connect().then(() => TutorSession.sendContext(lessonId));
+    TutorSession.connect(lessonId).catch((err) => console.error("[TutorSession] connect failed:", err));
   }
 }
 
-function sendTutorChatMessage() {
+async function sendTutorChatMessage() {
   const input = document.getElementById("tutor-chat-input");
   const text = input.value.trim();
   if (!text) return;
-  const messages = document.getElementById("tutor-chat-messages");
-  const bubble = document.createElement("div");
-  bubble.className = "tutor-chat-bubble tutor-chat-bubble-user";
-  bubble.textContent = text;
-  messages.appendChild(bubble);
-  messages.scrollTop = messages.scrollHeight;
   input.value = "";
-  TutorSession.sendMessage(text); // visible bubble is separate from the wire payload — no suppression needed here
+  input.disabled = true;
+  appendTutorChatBubble(text, "tutor-chat-bubble-user");
+  try {
+    await TutorSession.connect(lessonId);
+    await TutorSession.sendMessage(text);
+  } catch (err) {
+    console.error("[TutorSession] message send failed:", err);
+    appendTutorChatBubble(
+      "I couldn't connect to the avatar service. Make sure OpenAvatarChat is running, then try again.",
+      "tutor-chat-bubble-agent tutor-chat-bubble-error"
+    );
+  } finally {
+    input.disabled = false;
+    input.focus();
+  }
 }
 
 document.getElementById("tutor-chat-toggle").addEventListener("click", toggleTutorChat);
@@ -2441,6 +2670,7 @@ document.getElementById("tutor-chat-send").addEventListener("click", sendTutorCh
 document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendTutorChatMessage();
 });
+window.addEventListener("pagehide", () => TutorSession.disconnect());
 
 // ─── Animations ───────────────────────────────────────────────────────────────
 /*
@@ -3430,6 +3660,7 @@ function switchScene(name) {
   document.getElementById("tutor-chat-widget").classList.toggle("hidden", !inLesson);
   if (!inLesson) {
     document.getElementById("tutor-chat-panel").classList.add("hidden");
+    TutorSession.disconnect();
   }
 
 
