@@ -2539,6 +2539,30 @@ const TutorSession = {
     return payload;
   },
 
+  async _speakEcho(text, { interrupt = true } = {}) {
+    if (!this.activeLessonId || !this.sessionId) {
+      throw new Error("Tutor avatar is not connected.");
+    }
+
+    const res = await fetch(
+      `/api/lessons/${encodeURIComponent(this.activeLessonId)}/avatar/speak`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionid: this.sessionId,
+          text,
+          interrupt,
+        }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok !== true) {
+      throw new Error(data.error || "LiveTalking speech request failed.");
+    }
+    return data;
+  },
+
   // Called once per lesson-open, before the panel accepts user input.
   async sendContext(lessonId) {
     if (this.contextSent) return;
@@ -2550,10 +2574,10 @@ const TutorSession = {
   },
 
   async sendMessage(text) {
-    if (!this.sessionId) {
+    if (this.activeLessonId !== lessonId || !this.sessionId) {
       await this.connect(lessonId);
     }
-    return this._send(text);
+    return this._speakEcho(text);
   },
 };
 
@@ -2775,22 +2799,26 @@ function toggleTutorChat() {
 
 async function sendTutorChatMessage() {
   const input = document.getElementById("tutor-chat-input");
+  const sendButton = document.getElementById("tutor-chat-send");
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
   input.disabled = true;
+  sendButton.disabled = true;
   appendTutorChatBubble(text, "tutor-chat-bubble-user");
   try {
-    // await TutorSession.connect(lessonId);
-    // await TutorSession.sendMessage(text);
+    await ensureTutorSessionConnected();
+    await TutorSession.sendMessage(text);
+    appendTutorChatBubble(text, "tutor-chat-bubble-agent");
   } catch (err) {
     console.error("[TutorSession] message send failed:", err);
-    // appendTutorChatBubble(
-    //   "I couldn't connect to the avatar service. Make sure OpenAvatarChat is running, then try again.",
-    //   "tutor-chat-bubble-agent tutor-chat-bubble-error"
-    // );
+    appendTutorChatBubble(
+      "Avatar speech failed. Check that LiveTalking is running, then try again.",
+      "tutor-chat-bubble-agent tutor-chat-bubble-error"
+    );
   } finally {
     input.disabled = false;
+    sendButton.disabled = false;
     input.focus();
   }
 }

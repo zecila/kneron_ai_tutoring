@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 import hashlib
 import logging
@@ -1490,6 +1491,8 @@ def get_lesson_media(lesson_id, filename):
 # ── LiveTalking ────────────────────────────────────────────────────────────────
 LIVETALKING_BASE_URL = os.environ.get("LIVETALKING_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
 LIVETALKING_SIGNALING_TIMEOUT = int(os.environ.get("LIVETALKING_SIGNALING_TIMEOUT", "60"))
+LIVETALKING_COMMAND_TIMEOUT = int(os.environ.get("LIVETALKING_COMMAND_TIMEOUT", "15"))
+LIVETALKING_MAX_TEXT_LENGTH = 2000
 
 
 @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
@@ -1522,6 +1525,60 @@ def avatar_webrtc_offer(lesson_id):
         status=upstream.status_code,
         content_type=upstream.headers.get("Content-Type", "application/json"),
     )
+
+
+@app.route("/api/lessons/<lesson_id>/avatar/speak", methods=["POST"])
+@limiter.limit("120 per hour")
+def avatar_speak(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    avatar_session_id = body.get("sessionid")
+    if not isinstance(avatar_session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", avatar_session_id):
+        return jsonify({"error": "Invalid avatar session ID"}), 400
+
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "No text provided"}), 400
+    text = text.strip()
+    if len(text) > LIVETALKING_MAX_TEXT_LENGTH:
+        return jsonify({"error": f"Text must be {LIVETALKING_MAX_TEXT_LENGTH} characters or fewer"}), 400
+
+    interrupt = body.get("interrupt", True)
+    if not isinstance(interrupt, bool):
+        return jsonify({"error": "interrupt must be a boolean"}), 400
+
+    try:
+        upstream = requests.post(
+            f"{LIVETALKING_BASE_URL}/human",
+            json={
+                "sessionid": avatar_session_id,
+                "type": "echo",
+                "text": text,
+                "interrupt": interrupt,
+            },
+            timeout=LIVETALKING_COMMAND_TIMEOUT,
+        )
+        upstream.raise_for_status()
+        result = upstream.json()
+    except requests.RequestException as e:
+        app.logger.error(f"LiveTalking speech proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking speech service unavailable"}), 502
+    except ValueError:
+        app.logger.error("LiveTalking speech proxy returned invalid JSON")
+        return jsonify({"error": "Invalid response from LiveTalking speech service"}), 502
+
+    if not isinstance(result, dict) or result.get("code") != 0:
+        message = result.get("msg", "Speech request failed") if isinstance(result, dict) else "Speech request failed"
+        app.logger.warning(f"LiveTalking rejected speech request: {message}")
+        return jsonify({"error": message}), 502
+
+    return jsonify({"ok": True})
 
 @app.route("/api/lessons/<lesson_id>/tutor-context")
 @limiter.limit("20 per hour")
