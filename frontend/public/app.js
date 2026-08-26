@@ -31,6 +31,10 @@ let currentSpeed = 1;
 let currentVolume = 1;
 let currentAudio = null;
 let audioPaused = false;
+let tutorPanelOpen = false;
+let tutorPausedNarration = false;
+let tutorDeferredNarration = false;
+let tutorAllowsNarration = false;
 const ttsCache = new Map();      // notes text → blob URL, cached for the session
 const TTS_CACHE_LIMIT = 5;
 let ttsRequestId = 0;
@@ -941,6 +945,7 @@ async function loadSlideshow(justGenerated = false) {
 // ─── Welcome screen ───────────────────────────────────────────────────────────
 function showWelcome() {
   lastScene = "welcome"; // so Back-from-Progress can return here
+  setTutorWidgetVisible(false);
   document.getElementById("welcome-screen").classList.remove("hidden");
   document.getElementById("loading-screen").classList.add("hidden");
   document.getElementById("slideshow").classList.add("hidden");
@@ -1747,8 +1752,8 @@ function showScreen(name) {
     document.getElementById("slideshow").classList.remove("hidden");
     document.getElementById("loading-screen").classList.add("hidden");
     document.getElementById("error-screen").classList.add("hidden");
-    document.getElementById("tutor-chat-widget").classList.remove("hidden");
   }
+  setTutorWidgetVisible(name === "slideshow");
 }
 
 // ─── Slide rendering ──────────────────────────────────────────────────────────
@@ -1807,7 +1812,14 @@ function renderSlide(index) {
     const notes = slide.speaker_notes;
     const snapId = ttsRequestId;   // snapshot before any async gap
 
-    if (cacheGet(notes)) {
+    if (tutorPanelOpen && !tutorAllowsNarration) {
+      const btn = document.getElementById("tts-narrate-btn");
+      tutorDeferredNarration = true;
+      setNarrationButtonPlaying(false);
+      btn.disabled = false;
+      btn.onclick = () => toggleNarrationFromControl(notes, btn);
+      prefetchTTS(notes);
+    } else if (cacheGet(notes)) {
       // Cached — short delay then autoplay
       autoPlayTimer = setTimeout(() => {
         autoPlayTimer = null;
@@ -1818,7 +1830,7 @@ function renderSlide(index) {
           // User cancelled during the 2s wait — leave as paused
           btn.textContent = "▶";
           btn.classList.remove("tts-btn-active");
-          btn.onclick = () => speakNotes(notes, btn);
+          btn.onclick = () => toggleNarrationFromControl(notes, btn);
         }
       }, 2000);
     } else {
@@ -2361,58 +2373,61 @@ function toggleSidebar() {
   setTimeout(fitSlideToStage, 220);
 }
 
-// ─── Tutor session (OpenAvatarChat data channel) ───────────────────────────────
+// ─── Tutor session (LiveTalking WebRTC stream) ────────────────────────────────
 const TutorSession = {
   peerConnection: null,
-  channel: null,
-  webrtcId: null,
+  sessionId: null,
+  activeLessonId: null,
   remoteStream: null,
-  syntheticStream: null,
-  syntheticVideoTimer: null,
-  audioContext: null,
   connectingPromise: null,
   disconnecting: false,
-  offerAccepted: false,
-  pendingIceCandidates: [],
+  connectionAttempt: 0,
   contextSent: false,
 
   async connect(activeLessonId) {
     if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
-    if (this.channel?.readyState === "open" && this.peerConnection?.connectionState !== "closed") {
-      return;
+    if (
+      this.activeLessonId === activeLessonId &&
+      this.sessionId &&
+      ["new", "connecting", "connected"].includes(this.peerConnection?.connectionState)
+    ) {
+      return this.sessionId;
     }
-    if (this.connectingPromise) return this.connectingPromise;
+    if (this.activeLessonId === activeLessonId && this.connectingPromise) {
+      return this.connectingPromise;
+    }
 
-    this.connectingPromise = this._connect(activeLessonId).finally(() => {
-      this.connectingPromise = null;
-    });
-    return this.connectingPromise;
+    this.disconnect();
+    this.activeLessonId = activeLessonId;
+    const connectionAttempt = this.connectionAttempt;
+    let connectingPromise;
+    connectingPromise = this._connect(activeLessonId)
+      .catch((err) => {
+        if (this.connectionAttempt === connectionAttempt) this.disconnect();
+        throw err;
+      })
+      .finally(() => {
+        if (this.connectingPromise === connectingPromise) this.connectingPromise = null;
+      });
+    this.connectingPromise = connectingPromise;
+    return connectingPromise;
   },
 
   async _connect(activeLessonId) {
-    this.disconnect();
-
     const videoEl = document.getElementById("tutor-chat-avatar-video");
     if (!videoEl) throw new Error("Tutor avatar video element is missing.");
 
-    const pc = new RTCPeerConnection();
-    const webrtcId = crypto.randomUUID();
-    const signal = (body) => this._signal(activeLessonId, body);
+    const pc = new RTCPeerConnection({ sdpSemantics: "unified-plan" });
 
     this.peerConnection = pc;
-    this.webrtcId = webrtcId;
-    this.offerAccepted = false;
-    this.pendingIceCandidates = [];
+    this.sessionId = null;
     this.remoteStream = new MediaStream();
     videoEl.srcObject = this.remoteStream;
 
     pc.addEventListener("track", (event) => {
-      const [stream] = event.streams;
-      if (stream) {
-        videoEl.srcObject = stream;
-      } else {
+      if (pc !== this.peerConnection || !this.remoteStream) return;
+      if (!this.remoteStream.getTracks().includes(event.track)) {
         this.remoteStream.addTrack(event.track);
-        videoEl.srcObject = this.remoteStream;
       }
       videoEl.play().catch((err) => console.debug("Tutor avatar autoplay deferred:", err));
     });
@@ -2420,65 +2435,38 @@ const TutorSession = {
     pc.addEventListener("connectionstatechange", () => {
       console.debug("[TutorSession] peer connection:", pc.connectionState);
       if (pc !== this.peerConnection) return;
-      if (["failed", "closed"].includes(pc.connectionState)) {
+      if (pc.connectionState === "failed") {
+        setTutorConnectionStatus("Avatar connection lost.", true);
+        this.disconnect();
+      } else if (pc.connectionState === "closed") {
         this.disconnect();
       }
     });
 
-    pc.onicecandidate = ({ candidate }) => {
-      if (!candidate) return;
-      const iceMessage = {
-        candidate: candidate.toJSON(),
-        webrtc_id: webrtcId,
-        type: "ice-candidate",
-      };
-      if (!this.offerAccepted) {
-        this.pendingIceCandidates.push(iceMessage);
-        return;
-      }
-      signal(iceMessage).catch((err) => console.warn("[TutorSession] ICE candidate relay failed:", err));
-    };
-
-    this.channel = pc.createDataChannel("text");
-    this.channel.onmessage = (event) => {
-      console.debug("[TutorSession] data channel message:", event.data);
-    };
-
-    this.syntheticStream = this._createSyntheticInputStream();
-    if (this.audioContext?.state === "suspended") {
-      await this.audioContext.resume().catch((err) => console.debug("Tutor synthetic audio resume deferred:", err));
-    }
-    this.syntheticStream.getTracks().forEach((track) => pc.addTrack(track, this.syntheticStream));
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    const answer = await signal({
-      sdp: offer.sdp,
-      type: offer.type,
-      webrtc_id: webrtcId,
+    await this._waitForIceGatheringComplete(pc);
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+
+    const answer = await this._signal(activeLessonId, {
+      sdp: pc.localDescription.sdp,
+      type: pc.localDescription.type,
     });
     if (this.peerConnection !== pc) {
       throw new Error("Tutor connection was closed.");
     }
-    await pc.setRemoteDescription(answer);
+    await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
     if (this.peerConnection !== pc) {
       throw new Error("Tutor connection was closed.");
     }
-    this.offerAccepted = true;
-    await Promise.all(
-      this.pendingIceCandidates.splice(0).map((candidate) =>
-        signal(candidate).catch((err) => console.warn("[TutorSession] ICE candidate relay failed:", err))
-      )
-    );
-    if (this.peerConnection !== pc) {
-      throw new Error("Tutor connection was closed.");
-    }
-    await this._waitForChannelOpen();
-    if (this.peerConnection !== pc) {
-      throw new Error("Tutor connection was closed.");
-    }
-    await this._delay(750);
+    this.sessionId = String(answer.sessionid);
     this.contextSent = false;
+    return this.sessionId;
   },
 
   async _signal(activeLessonId, body) {
@@ -2488,92 +2476,56 @@ const TutorSession = {
       body: JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.status === "failed") {
-      throw new Error(data.error || data.meta?.error || "OpenAvatarChat signaling failed.");
+    if (!res.ok || !data.sdp || !data.type || data.sessionid === undefined) {
+      throw new Error(data.error || data.msg || "LiveTalking signaling failed.");
     }
     return data;
   },
 
-  _waitForChannelOpen() {
-    if (this.channel?.readyState === "open") return Promise.resolve();
+  _waitForIceGatheringComplete(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
     return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error("Timed out waiting for tutor data channel."));
+      let timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        pc.removeEventListener("icegatheringstatechange", checkState);
+        pc.removeEventListener("signalingstatechange", checkState);
+      };
+
+      const checkState = () => {
+        if (pc.signalingState === "closed") {
+          cleanup();
+          reject(new Error("Tutor connection was closed."));
+        } else if (pc.iceGatheringState === "complete") {
+          cleanup();
+          resolve();
+        }
+      };
+      timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out gathering WebRTC connection candidates."));
       }, 15000);
-
-      this.channel.onopen = () => {
-        clearTimeout(timeout);
-        console.debug("[TutorSession] data channel open");
-        resolve();
-      };
-      this.channel.onerror = () => {
-        clearTimeout(timeout);
-        reject(new Error("Tutor data channel failed to open."));
-      };
+      pc.addEventListener("icegatheringstatechange", checkState);
+      pc.addEventListener("signalingstatechange", checkState);
+      checkState();
     });
-  },
-
-  _delay(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  },
-
-  _createSyntheticInputStream() {
-    const stream = new MediaStream();
-
-    const canvas = document.createElement("canvas");
-    canvas.width = 640;
-    canvas.height = 360;
-    const ctx = canvas.getContext("2d");
-    const drawFrame = () => {
-      ctx.fillStyle = "#111827";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    };
-    drawFrame();
-    this.syntheticVideoTimer = setInterval(drawFrame, 1000);
-    const [videoTrack] = canvas.captureStream(5).getVideoTracks();
-    if (videoTrack) stream.addTrack(videoTrack);
-
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if (AudioContextCtor) {
-      this.audioContext = new AudioContextCtor();
-      const oscillator = this.audioContext.createOscillator();
-      const gain = this.audioContext.createGain();
-      const destination = this.audioContext.createMediaStreamDestination();
-      gain.gain.value = 0;
-      oscillator.connect(gain);
-      gain.connect(destination);
-      oscillator.start();
-      const [audioTrack] = destination.stream.getAudioTracks();
-      if (audioTrack) stream.addTrack(audioTrack);
-    }
-
-    return stream;
   },
 
   disconnect() {
     if (this.disconnecting) return;
     this.disconnecting = true;
+    this.connectionAttempt += 1;
+    this.connectingPromise = null;
     const videoEl = document.getElementById("tutor-chat-avatar-video");
     try {
       if (videoEl) videoEl.srcObject = null;
-      if (this.syntheticVideoTimer) {
-        clearInterval(this.syntheticVideoTimer);
-        this.syntheticVideoTimer = null;
-      }
-      this.syntheticStream?.getTracks().forEach((track) => track.stop());
-      this.syntheticStream = null;
       this.remoteStream?.getTracks().forEach((track) => track.stop());
       this.remoteStream = null;
-      this.channel?.close();
-      this.channel = null;
-      this.peerConnection?.getSenders().forEach((sender) => sender.track?.stop());
       this.peerConnection?.close();
       this.peerConnection = null;
-      this.webrtcId = null;
-      this.offerAccepted = false;
-      this.pendingIceCandidates = [];
-      this.audioContext?.close?.().catch?.((err) => console.debug("Tutor synthetic audio close failed:", err));
-      this.audioContext = null;
+      this.sessionId = null;
+      this.activeLessonId = null;
+      this.contextSent = false;
     } catch (err) {
       console.warn("[TutorSession] disconnect cleanup failed:", err);
     } finally {
@@ -2582,21 +2534,8 @@ const TutorSession = {
   },
 
   _send(text, { silent = false } = {}) {
-    const payload = {
-      header: { name: "SendHumanText", request_id: crypto.randomUUID() },
-      payload: {
-        request_id: crypto.randomUUID(),
-        stream_key: crypto.randomUUID(),
-        mode: "full_text",
-        text,
-        end_of_speech: true,
-      },
-    };
-    if (this.channel && this.channel.readyState === "open") {
-      this.channel.send(JSON.stringify(payload));
-    } else {
-      console.log(`[TutorSession] (no live channel, would send${silent ? ", silent" : ""}):`, payload);
-    }
+    const payload = { text, silent };
+    console.log("[TutorSession] LiveTalking text delivery is not connected yet:", payload);
     return payload;
   },
 
@@ -2611,12 +2550,54 @@ const TutorSession = {
   },
 
   async sendMessage(text) {
-    if (this.channel?.readyState !== "open") {
+    if (!this.sessionId) {
       await this.connect(lessonId);
     }
     return this._send(text);
   },
 };
+
+const TUTOR_AVATAR_MIN_HEIGHT = 140;
+const TUTOR_AVATAR_SCROLL_RANGE = 280;
+let tutorAvatarResizeFrame = null;
+
+function updateTutorAvatarSize() {
+  const panel = document.getElementById("tutor-chat-panel");
+  if (panel.classList.contains("hidden")) return;
+
+  const messages = document.getElementById("tutor-chat-messages");
+  const avatar = document.getElementById("tutor-chat-avatar");
+  const distanceFromBottom = Math.max(
+    0,
+    messages.scrollHeight - messages.clientHeight - messages.scrollTop
+  );
+  const expandedHeight = Math.min(330, Math.max(190, panel.clientHeight * 0.58));
+  const collapseProgress = Math.min(1, distanceFromBottom / TUTOR_AVATAR_SCROLL_RANGE);
+  const targetHeight = expandedHeight - (expandedHeight - TUTOR_AVATAR_MIN_HEIGHT) * collapseProgress;
+  const currentHeight = Number.parseFloat(avatar.style.getPropertyValue("--tutor-avatar-height"));
+
+  if (Number.isFinite(currentHeight) && Math.abs(currentHeight - targetHeight) < 0.5) return;
+
+  avatar.style.setProperty("--tutor-avatar-height", `${targetHeight}px`);
+  const nextMaxScroll = Math.max(0, messages.scrollHeight - messages.clientHeight);
+  messages.scrollTop = Math.max(0, nextMaxScroll - distanceFromBottom);
+}
+
+function scheduleTutorAvatarSizeUpdate() {
+  if (tutorAvatarResizeFrame !== null) return;
+  tutorAvatarResizeFrame = requestAnimationFrame(() => {
+    tutorAvatarResizeFrame = null;
+    updateTutorAvatarSize();
+  });
+}
+
+function resetTutorAvatarSize() {
+  if (tutorAvatarResizeFrame !== null) {
+    cancelAnimationFrame(tutorAvatarResizeFrame);
+    tutorAvatarResizeFrame = null;
+  }
+  document.getElementById("tutor-chat-avatar").style.removeProperty("--tutor-avatar-height");
+}
 
 function appendTutorChatBubble(text, className) {
   const messages = document.getElementById("tutor-chat-messages");
@@ -2625,21 +2606,171 @@ function appendTutorChatBubble(text, className) {
   bubble.textContent = text;
   messages.appendChild(bubble);
   messages.scrollTop = messages.scrollHeight;
+  scheduleTutorAvatarSizeUpdate();
   return bubble;
 }
 
-// ─── Chatbot toggle ───────────────────────────────────────────────────────────
-function toggleTutorChat() {
-  const panel = document.getElementById("tutor-chat-panel");
-  const wasHidden = panel.classList.contains("hidden");
-  panel.classList.toggle("hidden");
-  if (!wasHidden) {
-    TutorSession.disconnect();
+function setTutorConnectionStatus(message, isError = false) {
+  const messages = document.getElementById("tutor-chat-messages");
+  let status = messages.querySelector(".tutor-connection-status");
+  if (!message) {
+    status?.remove();
     return;
   }
-  if (wasHidden && lessonId) {
-    TutorSession.connect(lessonId).catch((err) => console.error("[TutorSession] connect failed:", err));
+  if (!status) {
+    status = appendTutorChatBubble("", "tutor-chat-bubble-agent tutor-connection-status");
   }
+  status.textContent = message;
+  status.classList.toggle("tutor-chat-bubble-error", isError);
+}
+
+function ensureTutorSessionConnected() {
+  if (!lessonId) return Promise.resolve(null);
+  const connectingLessonId = lessonId;
+  const isConnected =
+    TutorSession.activeLessonId === connectingLessonId &&
+    TutorSession.sessionId &&
+    ["new", "connecting", "connected"].includes(TutorSession.peerConnection?.connectionState);
+
+  if (isConnected) {
+    setTutorConnectionStatus("");
+    return Promise.resolve(TutorSession.sessionId);
+  }
+
+  setTutorConnectionStatus("Connecting avatar...");
+  return TutorSession.connect(connectingLessonId)
+    .then((sessionId) => {
+      const widget = document.getElementById("tutor-chat-widget");
+      if (!widget.classList.contains("hidden") && lessonId === connectingLessonId) {
+        setTutorConnectionStatus("");
+      }
+      return sessionId;
+    })
+    .catch((err) => {
+      console.error("[TutorSession] connect failed:", err);
+      const widget = document.getElementById("tutor-chat-widget");
+      if (!widget.classList.contains("hidden") && lessonId === connectingLessonId) {
+        setTutorConnectionStatus("Could not connect to the avatar service.", true);
+      }
+      throw err;
+    });
+}
+
+function setTutorWidgetVisible(visible) {
+  const widget = document.getElementById("tutor-chat-widget");
+  const panel = document.getElementById("tutor-chat-panel");
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  widget.classList.toggle("hidden", !visible);
+  if (visible) {
+    videoEl.muted = panel.classList.contains("hidden");
+    ensureTutorSessionConnected().catch(() => {});
+    return;
+  }
+  panel.classList.add("hidden");
+  videoEl.muted = true;
+  tutorPanelOpen = false;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  tutorAllowsNarration = false;
+  setTutorConnectionStatus("");
+  document.getElementById("tutor-chat-messages").replaceChildren();
+  document.getElementById("tutor-chat-input").value = "";
+  resetTutorAvatarSize();
+  TutorSession.disconnect();
+}
+
+// ─── Chatbot toggle ───────────────────────────────────────────────────────────
+function setNarrationButtonPlaying(playing) {
+  const btn = document.getElementById("tts-narrate-btn");
+  if (!btn) return;
+  btn.textContent = playing ? "■" : "▶";
+  btn.classList.toggle("tts-btn-active", playing);
+}
+
+function toggleNarrationFromControl(text, btn) {
+  if (tutorPanelOpen) {
+    const isPlaying = Boolean(currentAudio && !currentAudio.paused && !audioPaused);
+    tutorAllowsNarration = !isPlaying;
+    tutorPausedNarration = false;
+    tutorDeferredNarration = false;
+  }
+  return speakNotes(text, btn);
+}
+
+function pauseNarrationForTutor() {
+  tutorPanelOpen = true;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  tutorAllowsNarration = false;
+  if (!currentAudio) {
+    const btn = document.getElementById("tts-narrate-btn");
+    const notes = slides[current]?.speaker_notes;
+    const narrationPending = Boolean(autoPlayTimer || btn?.classList.contains("tts-btn-active"));
+    if (notes && btn && narrationPending) {
+      if (autoPlayTimer) {
+        clearTimeout(autoPlayTimer);
+        autoPlayTimer = null;
+      }
+      ttsRequestId++;
+      tutorDeferredNarration = true;
+      setNarrationButtonPlaying(false);
+      btn.disabled = false;
+      btn.onclick = () => toggleNarrationFromControl(notes, btn);
+    }
+    return;
+  }
+  if (currentAudio.paused) return;
+
+  currentAudio.pause();
+  audioPaused = true;
+  tutorPausedNarration = true;
+  setNarrationButtonPlaying(false);
+}
+
+function resumeNarrationAfterTutor() {
+  tutorPanelOpen = false;
+  const shouldResume = tutorPausedNarration;
+  const shouldStart = tutorDeferredNarration;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  tutorAllowsNarration = false;
+
+  if (shouldResume && currentAudio && audioPaused) {
+    const audioToResume = currentAudio;
+    audioPaused = false;
+    setNarrationButtonPlaying(true);
+    audioToResume.play().catch((err) => {
+      if (currentAudio !== audioToResume) return;
+      audioPaused = true;
+      setNarrationButtonPlaying(false);
+      console.debug("Lesson narration resume deferred:", err);
+    });
+    return;
+  }
+
+  if (shouldStart && !currentAudio) {
+    const notes = slides[current]?.speaker_notes;
+    const btn = document.getElementById("tts-narrate-btn");
+    if (notes && btn) speakNotes(notes, btn);
+  }
+}
+
+function toggleTutorChat() {
+  const panel = document.getElementById("tutor-chat-panel");
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  const wasHidden = panel.classList.contains("hidden");
+  if (!wasHidden) {
+    panel.classList.add("hidden");
+    videoEl.muted = true;
+    resumeNarrationAfterTutor();
+    return;
+  }
+  panel.classList.remove("hidden");
+  pauseNarrationForTutor();
+  videoEl.muted = false;
+  videoEl.play().catch((err) => console.debug("Tutor avatar playback deferred:", err));
+  scheduleTutorAvatarSizeUpdate();
+  ensureTutorSessionConnected().catch(() => {});
 }
 
 async function sendTutorChatMessage() {
@@ -2650,14 +2781,14 @@ async function sendTutorChatMessage() {
   input.disabled = true;
   appendTutorChatBubble(text, "tutor-chat-bubble-user");
   try {
-    await TutorSession.connect(lessonId);
-    await TutorSession.sendMessage(text);
+    // await TutorSession.connect(lessonId);
+    // await TutorSession.sendMessage(text);
   } catch (err) {
     console.error("[TutorSession] message send failed:", err);
-    appendTutorChatBubble(
-      "I couldn't connect to the avatar service. Make sure OpenAvatarChat is running, then try again.",
-      "tutor-chat-bubble-agent tutor-chat-bubble-error"
-    );
+    // appendTutorChatBubble(
+    //   "I couldn't connect to the avatar service. Make sure OpenAvatarChat is running, then try again.",
+    //   "tutor-chat-bubble-agent tutor-chat-bubble-error"
+    // );
   } finally {
     input.disabled = false;
     input.focus();
@@ -2670,6 +2801,8 @@ document.getElementById("tutor-chat-send").addEventListener("click", sendTutorCh
 document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendTutorChatMessage();
 });
+document.getElementById("tutor-chat-messages").addEventListener("scroll", scheduleTutorAvatarSizeUpdate);
+window.addEventListener("resize", scheduleTutorAvatarSizeUpdate);
 window.addEventListener("pagehide", () => TutorSession.disconnect());
 
 // ─── Animations ───────────────────────────────────────────────────────────────
@@ -2897,10 +3030,16 @@ function cancelAutoPlay(notes, btn) {
   // Invalidate any in-flight fetch
   ttsRequestId++;
 
+  if (tutorPanelOpen) {
+    tutorAllowsNarration = false;
+    tutorPausedNarration = false;
+    tutorDeferredNarration = false;
+  }
+
   // Reset button to paused state — clicking again resumes/plays
   btn.textContent = "▶";
   btn.classList.remove("tts-btn-active");
-  btn.onclick = () => speakNotes(notes, btn);
+  btn.onclick = () => toggleNarrationFromControl(notes, btn);
 }
 
 function cacheGet(key) {
@@ -2960,7 +3099,7 @@ async function speakNotes(text, btn) {
   const cachedUrl = cacheGet(text);
   if (cachedUrl) {
     // Restore normal toggle behavior now that we're actually playing
-    btn.onclick = () => speakNotes(text, btn);
+    btn.onclick = () => toggleNarrationFromControl(text, btn);
     startAudio(cachedUrl, text, btn);
     return;
   }
@@ -2983,7 +3122,7 @@ async function speakNotes(text, btn) {
     cacheSet(text, url);      // ← cache it before first play
 
     if (requestId !== ttsRequestId) return;   // slide changed mid-load; still cached, just don't play it
-    btn.onclick = () => speakNotes(text, btn);
+    btn.onclick = () => toggleNarrationFromControl(text, btn);
     startAudio(url, text, btn);
   } catch (err) {
     if (requestId !== ttsRequestId) return;    // don't touch a button that now belongs to a different slide
@@ -3018,7 +3157,13 @@ function startAudio(url, text, btn) {
   currentAudio.addEventListener("play", startHighlightLoop);
   currentAudio.addEventListener("pause", stopHighlightLoop);
 
-  currentAudio.onended = () => finishNarration(btn);
+  const narratedAudio = currentAudio;
+  const narratedSlideIndex = current;
+  currentAudio.onended = () => {
+    if (currentAudio !== narratedAudio || current !== narratedSlideIndex) return;
+    finishNarration(btn);
+    if (current < slides.length - 1) navigate(1);
+  };
 
   btn.textContent = "■";
   btn.classList.add("tts-btn-active");
@@ -3046,6 +3191,7 @@ function stopNarrationFully() {
     currentAudio = null;
   }
   audioPaused = false;
+  tutorAllowsNarration = false;
   if (autoPlayTimer) {
     clearTimeout(autoPlayTimer);
     autoPlayTimer = null;
@@ -3657,11 +3803,7 @@ function switchScene(name) {
   document.getElementById("account-screen").classList.toggle("hidden", name !== "account");
 
   const inLesson = name === "slideshow" || name === "study";
-  document.getElementById("tutor-chat-widget").classList.toggle("hidden", !inLesson);
-  if (!inLesson) {
-    document.getElementById("tutor-chat-panel").classList.add("hidden");
-    TutorSession.disconnect();
-  }
+  setTutorWidgetVisible(inLesson);
 
 
   if (name === "progress") {

@@ -1069,73 +1069,73 @@ def tts():
 # Note: OAC's handler hardcodes a 5s client timeout (see llm_handler_openai_compatible.py).
 # Send OpenAI-shaped empty chunks while the real LLM is thinking so OAC's streaming
 # client does not time out before the first visible token arrives.
-@app.route("/api/avatar/v1/chat/completions", methods=["POST"])
-@limiter.limit("120 per hour")
-def avatar_chat_completions():
-    body = request.get_json(force=True, silent=True) or {}
-    messages = body.get("messages")
-    if not messages:
-        return jsonify({"error": "No messages provided"}), 400
-
-    model = body.get("model") or "gpt-5.4-mini"
-
-    def empty_chunk():
-        return {
-            "id": f"chatcmpl-keepalive-{uuid.uuid4().hex}",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {"role": "assistant", "content": ""},
-                    "finish_reason": None,
-                }
-            ],
-        }
-
-    def generate():
-        chunks = Queue()
-
-        def run_llm_stream():
-            try:
-                stream = llm_client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-                for chunk in stream:
-                    chunks.put(("chunk", chunk))
-                chunks.put(("done", None))
-            except (InternalServerError, APIConnectionError, RateLimitError) as e:
-                app.logger.error(f"Avatar LLM proxy upstream error: {repr(e)}")
-                chunks.put(("error", {"message": str(e), "type": "upstream_error"}))
-            except Exception as e:
-                app.logger.error(f"Avatar LLM proxy failed: {repr(e)}")
-                chunks.put(("error", {"message": str(e), "type": "proxy_error"}))
-
-        threading.Thread(target=run_llm_stream, daemon=True).start()
-
-        yield f"data: {json.dumps(empty_chunk())}\n\n"
-        while True:
-            try:
-                kind, payload = chunks.get(timeout=2)
-            except Empty:
-                yield f"data: {json.dumps(empty_chunk())}\n\n"
-                continue
-
-            if kind == "chunk":
-                yield f"data: {payload.model_dump_json()}\n\n"
-            elif kind == "error":
-                yield f"data: {json.dumps({'error': payload})}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-            else:
-                yield "data: [DONE]\n\n"
-                return
-
-    return Response(generate(), mimetype="text/event-stream")
+# @app.route("/api/avatar/v1/chat/completions", methods=["POST"])
+# @limiter.limit("120 per hour")
+# def avatar_chat_completions():
+#     body = request.get_json(force=True, silent=True) or {}
+#     messages = body.get("messages")
+#     if not messages:
+#         return jsonify({"error": "No messages provided"}), 400
+#
+#     model = body.get("model") or "gpt-5.4-mini"
+#
+#     def empty_chunk():
+#         return {
+#             "id": f"chatcmpl-keepalive-{uuid.uuid4().hex}",
+#             "object": "chat.completion.chunk",
+#             "created": int(time.time()),
+#             "model": model,
+#             "choices": [
+#                 {
+#                     "index": 0,
+#                     "delta": {"role": "assistant", "content": ""},
+#                     "finish_reason": None,
+#                 }
+#             ],
+#         }
+#
+#     def generate():
+#         chunks = Queue()
+#
+#         def run_llm_stream():
+#             try:
+#                 stream = llm_client.chat.completions.create(
+#                     model=model,
+#                     messages=messages,
+#                     stream=True,
+#                     stream_options={"include_usage": True},
+#                 )
+#                 for chunk in stream:
+#                     chunks.put(("chunk", chunk))
+#                 chunks.put(("done", None))
+#             except (InternalServerError, APIConnectionError, RateLimitError) as e:
+#                 app.logger.error(f"Avatar LLM proxy upstream error: {repr(e)}")
+#                 chunks.put(("error", {"message": str(e), "type": "upstream_error"}))
+#             except Exception as e:
+#                 app.logger.error(f"Avatar LLM proxy failed: {repr(e)}")
+#                 chunks.put(("error", {"message": str(e), "type": "proxy_error"}))
+#
+#         threading.Thread(target=run_llm_stream, daemon=True).start()
+#
+#         yield f"data: {json.dumps(empty_chunk())}\n\n"
+#         while True:
+#             try:
+#                 kind, payload = chunks.get(timeout=2)
+#             except Empty:
+#                 yield f"data: {json.dumps(empty_chunk())}\n\n"
+#                 continue
+#
+#             if kind == "chunk":
+#                 yield f"data: {payload.model_dump_json()}\n\n"
+#             elif kind == "error":
+#                 yield f"data: {json.dumps({'error': payload})}\n\n"
+#                 yield "data: [DONE]\n\n"
+#                 return
+#             else:
+#                 yield "data: [DONE]\n\n"
+#                 return
+#
+#     return Response(generate(), mimetype="text/event-stream")
 
 
 # ── Pipeline orchestration ─────────────────────────────────────────────────────  ← new section
@@ -1451,35 +1451,71 @@ def get_lesson_media(lesson_id, filename):
     return send_from_directory(base_dir, filename)
 
 # ── OpenAvatarChat  ───────────────────────────────────────────────────────────────
-OPENAVATARCHAT_BASE_URL = os.environ.get("OPENAVATARCHAT_BASE_URL", "https://localhost:8283").rstrip("/")
-OPENAVATARCHAT_VERIFY_TLS = os.environ.get("OPENAVATARCHAT_VERIFY_TLS", "false").lower() in {"1", "true", "yes"}
-OPENAVATARCHAT_SIGNALING_TIMEOUT = int(os.environ.get("OPENAVATARCHAT_SIGNALING_TIMEOUT", "60"))
+# OPENAVATARCHAT_BASE_URL = os.environ.get("OPENAVATARCHAT_BASE_URL", "https://localhost:8283").rstrip("/")
+# OPENAVATARCHAT_VERIFY_TLS = os.environ.get("OPENAVATARCHAT_VERIFY_TLS", "false").lower() in {"1", "true", "yes"}
+# OPENAVATARCHAT_SIGNALING_TIMEOUT = int(os.environ.get("OPENAVATARCHAT_SIGNALING_TIMEOUT", "60"))
+#
+# @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
+# @limiter.limit("600 per hour")
+# def avatar_webrtc_offer(lesson_id):
+#     user_id, session_id = current_identity()
+#     if not resolve_lesson_access(lesson_id, user_id, session_id):
+#         return jsonify({"error": "Lesson not found"}), 404
+#
+#     body = request.get_json(force=True, silent=True)
+#     if not isinstance(body, dict):
+#         return jsonify({"error": "Invalid JSON body"}), 400
+#     if body.get("type") not in {"offer", "ice-candidate"}:
+#         return jsonify({"error": "Unsupported WebRTC message type"}), 400
+#     if not body.get("webrtc_id"):
+#         return jsonify({"error": "Missing webrtc_id"}), 400
+#
+#     try:
+#         upstream = requests.post(
+#             f"{OPENAVATARCHAT_BASE_URL}/webrtc/offer",
+#             json=body,
+#             timeout=OPENAVATARCHAT_SIGNALING_TIMEOUT,
+#             verify=OPENAVATARCHAT_VERIFY_TLS,
+#         )
+#     except requests.RequestException as e:
+#         app.logger.error(f"OpenAvatarChat signaling proxy failed: {type(e).__name__}: {e}")
+#         return jsonify({"error": "OpenAvatarChat signaling unavailable"}), 502
+#
+#     return Response(
+#         upstream.content,
+#         status=upstream.status_code,
+#         content_type=upstream.headers.get("Content-Type", "application/json"),
+#     )
+
+# ── LiveTalking ────────────────────────────────────────────────────────────────
+LIVETALKING_BASE_URL = os.environ.get("LIVETALKING_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
+LIVETALKING_SIGNALING_TIMEOUT = int(os.environ.get("LIVETALKING_SIGNALING_TIMEOUT", "60"))
+
 
 @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
-@limiter.limit("600 per hour")
+@limiter.limit("60 per hour")
 def avatar_webrtc_offer(lesson_id):
     user_id, session_id = current_identity()
     if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
 
-    body = request.get_json(force=True, silent=True)
+    body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"error": "Invalid JSON body"}), 400
-    if body.get("type") not in {"offer", "ice-candidate"}:
-        return jsonify({"error": "Unsupported WebRTC message type"}), 400
-    if not body.get("webrtc_id"):
-        return jsonify({"error": "Missing webrtc_id"}), 400
+    if body.get("type") != "offer":
+        return jsonify({"error": "WebRTC message type must be 'offer'"}), 400
+    if not isinstance(body.get("sdp"), str) or not body["sdp"].strip():
+        return jsonify({"error": "Missing SDP offer"}), 400
 
     try:
         upstream = requests.post(
-            f"{OPENAVATARCHAT_BASE_URL}/webrtc/offer",
-            json=body,
-            timeout=OPENAVATARCHAT_SIGNALING_TIMEOUT,
-            verify=OPENAVATARCHAT_VERIFY_TLS,
+            f"{LIVETALKING_BASE_URL}/offer",
+            json={"sdp": body["sdp"], "type": body["type"]},
+            timeout=LIVETALKING_SIGNALING_TIMEOUT,
         )
     except requests.RequestException as e:
-        app.logger.error(f"OpenAvatarChat signaling proxy failed: {type(e).__name__}: {e}")
-        return jsonify({"error": "OpenAvatarChat signaling unavailable"}), 502
+        app.logger.error(f"LiveTalking signaling proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking signaling unavailable"}), 502
 
     return Response(
         upstream.content,
