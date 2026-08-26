@@ -2374,6 +2374,10 @@ function toggleSidebar() {
 }
 
 // ─── Tutor session (LiveTalking WebRTC stream) ────────────────────────────────
+const TUTOR_SPEAKING_POLL_INTERVAL_MS = 500;
+const TUTOR_SPEAKING_START_TIMEOUT_MS = 10000;
+const TUTOR_SPEAKING_IDLE_CONFIRMATIONS = 2;
+
 const TutorSession = {
   peerConnection: null,
   sessionId: null,
@@ -2384,6 +2388,12 @@ const TutorSession = {
   connectionAttempt: 0,
   conversationLessonId: null,
   conversation: [],
+  speechState: "idle",
+  speakingPollTimer: null,
+  speakingMonitorId: 0,
+  messageAttempt: 0,
+  replyAbortController: null,
+  activePendingReply: null,
 
   async connect(activeLessonId) {
     if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
@@ -2398,11 +2408,17 @@ const TutorSession = {
       return this.connectingPromise;
     }
 
-    this.disconnect();
+    const releasePromise = this.disconnect();
     this.activeLessonId = activeLessonId;
     const connectionAttempt = this.connectionAttempt;
     let connectingPromise;
-    connectingPromise = this._connect(activeLessonId)
+    connectingPromise = releasePromise
+      .then(() => {
+        if (this.connectionAttempt !== connectionAttempt) {
+          throw new Error("Tutor connection was superseded.");
+        }
+        return this._connect(activeLessonId);
+      })
       .catch((err) => {
         if (this.connectionAttempt === connectionAttempt) this.disconnect();
         throw err;
@@ -2437,9 +2453,13 @@ const TutorSession = {
       console.debug("[TutorSession] peer connection:", pc.connectionState);
       if (pc !== this.peerConnection) return;
       if (pc.connectionState === "failed") {
+        this._stopSpeakingMonitor();
+        this._setSpeechState("idle");
         setTutorConnectionStatus("Avatar connection lost.", true);
         this.disconnect();
       } else if (pc.connectionState === "closed") {
+        this._stopSpeakingMonitor();
+        this._setSpeechState("idle");
         this.disconnect();
       }
     });
@@ -2512,8 +2532,12 @@ const TutorSession = {
   },
 
   disconnect() {
-    if (this.disconnecting) return;
+    if (this.disconnecting) return Promise.resolve(false);
     this.disconnecting = true;
+    const releaseRequest = this._avatarControl("disconnect", { keepalive: true }).catch((err) => {
+      console.debug("[TutorSession] remote session release unavailable:", err);
+      return null;
+    });
     this.connectionAttempt += 1;
     this.connectingPromise = null;
     const videoEl = document.getElementById("tutor-chat-avatar-video");
@@ -2530,9 +2554,10 @@ const TutorSession = {
     } finally {
       this.disconnecting = false;
     }
+    return releaseRequest.then((data) => data?.ok === true);
   },
 
-  async _speakEcho(text, { interrupt = true } = {}) {
+  async _speakEcho(text, { interrupt = true, signal } = {}) {
     if (!this.activeLessonId || !this.sessionId) {
       throw new Error("Tutor avatar is not connected.");
     }
@@ -2542,6 +2567,7 @@ const TutorSession = {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal,
         body: JSON.stringify({
           sessionid: this.sessionId,
           text,
@@ -2554,6 +2580,150 @@ const TutorSession = {
       throw new Error(data.error || "LiveTalking speech request failed.");
     }
     return data;
+  },
+
+  _setSpeechState(state) {
+    this.speechState = state;
+    const avatar = document.getElementById("tutor-chat-avatar");
+    if (avatar) avatar.dataset.speechState = state;
+  },
+
+  _stopSpeakingMonitor() {
+    this.speakingMonitorId += 1;
+    if (this.speakingPollTimer !== null) {
+      clearTimeout(this.speakingPollTimer);
+      this.speakingPollTimer = null;
+    }
+  },
+
+  async _avatarControl(action, { keepalive = false } = {}) {
+    const activeLessonId = this.activeLessonId;
+    const avatarSessionId = this.sessionId;
+    if (!activeLessonId || !avatarSessionId) return null;
+
+    const res = await fetch(
+      `/api/lessons/${encodeURIComponent(activeLessonId)}/avatar/${action}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive,
+        body: JSON.stringify({ sessionid: avatarSessionId }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Avatar ${action} request failed.`);
+    return data;
+  },
+
+  async interruptSpeech() {
+    this._stopSpeakingMonitor();
+    this._setSpeechState("idle");
+    const data = await this._avatarControl("interrupt");
+    return data?.ok === true;
+  },
+
+  async _getSpeakingState() {
+    const data = await this._avatarControl("speaking");
+    if (!data || typeof data.speaking !== "boolean") return false;
+    return data.speaking;
+  },
+
+  _startSpeakingMonitor() {
+    this._stopSpeakingMonitor();
+    const monitorId = this.speakingMonitorId;
+    const startedAt = Date.now();
+    let observedSpeaking = false;
+    let idleChecks = 0;
+    this._setSpeechState("preparing");
+
+    const poll = async () => {
+      if (monitorId !== this.speakingMonitorId) return;
+      try {
+        const speaking = await this._getSpeakingState();
+        if (monitorId !== this.speakingMonitorId) return;
+        if (speaking) {
+          observedSpeaking = true;
+          idleChecks = 0;
+          this._setSpeechState("speaking");
+        } else if (observedSpeaking) {
+          idleChecks += 1;
+          if (idleChecks >= TUTOR_SPEAKING_IDLE_CONFIRMATIONS) {
+            this._stopSpeakingMonitor();
+            this._setSpeechState("idle");
+            return;
+          }
+        } else if (Date.now() - startedAt >= TUTOR_SPEAKING_START_TIMEOUT_MS) {
+          this._stopSpeakingMonitor();
+          this._setSpeechState("idle");
+          return;
+        }
+      } catch (err) {
+        console.debug("[TutorSession] speaking status unavailable:", err);
+        if (Date.now() - startedAt >= TUTOR_SPEAKING_START_TIMEOUT_MS) {
+          this._stopSpeakingMonitor();
+          this._setSpeechState("idle");
+          return;
+        }
+      }
+      this.speakingPollTimer = setTimeout(poll, TUTOR_SPEAKING_POLL_INTERVAL_MS);
+    };
+
+    this.speakingPollTimer = setTimeout(poll, 250);
+  },
+
+  _markPendingReplyInterrupted() {
+    const bubble = this.activePendingReply;
+    if (!bubble?.isConnected || bubble.dataset.pending !== "true") return;
+    bubble.dataset.pending = "false";
+    bubble.textContent = "Interrupted.";
+    bubble.classList.add("tutor-chat-bubble-interrupted");
+    scheduleTutorAvatarSizeUpdate();
+  },
+
+  beginMessageAttempt() {
+    this._markPendingReplyInterrupted();
+    this.activePendingReply = null;
+    this.replyAbortController?.abort();
+    this.messageAttempt += 1;
+    this.replyAbortController = new AbortController();
+    this._stopSpeakingMonitor();
+    this._setSpeechState("thinking");
+    return {
+      id: this.messageAttempt,
+      controller: this.replyAbortController,
+      signal: this.replyAbortController.signal,
+    };
+  },
+
+  registerPendingReply(attemptId, bubble) {
+    if (!this.isCurrentMessageAttempt(attemptId)) return;
+    bubble.dataset.pending = "true";
+    this.activePendingReply = bubble;
+  },
+
+  resolvePendingReply(attemptId) {
+    if (!this.isCurrentMessageAttempt(attemptId)) return;
+    if (this.activePendingReply) this.activePendingReply.dataset.pending = "false";
+    this.activePendingReply = null;
+  },
+
+  isCurrentMessageAttempt(attemptId) {
+    return attemptId === this.messageAttempt;
+  },
+
+  cancelActiveMessage() {
+    this._markPendingReplyInterrupted();
+    this.activePendingReply = null;
+    this.replyAbortController?.abort();
+    this.replyAbortController = null;
+    this.messageAttempt += 1;
+    this._stopSpeakingMonitor();
+    this._setSpeechState("idle");
+  },
+
+  finishMessageAttempt(attemptId, controller) {
+    if (!this.isCurrentMessageAttempt(attemptId) || this.replyAbortController !== controller) return;
+    this.replyAbortController = null;
   },
 
   _getContextLocation() {
@@ -2570,7 +2740,7 @@ const TutorSession = {
     };
   },
 
-  async _requestTutorReply(activeLessonId, text) {
+  async _requestTutorReply(activeLessonId, text, attempt) {
     if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
     if (this.conversationLessonId !== activeLessonId) {
       this.clearConversation();
@@ -2580,6 +2750,7 @@ const TutorSession = {
     const res = await fetch(`/api/lessons/${encodeURIComponent(activeLessonId)}/tutor/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: attempt.signal,
       body: JSON.stringify({
         message: text,
         history: this.conversation.slice(-12),
@@ -2587,6 +2758,9 @@ const TutorSession = {
       }),
     });
     const data = await res.json().catch(() => ({}));
+    if (!this.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor response was superseded.", "AbortError");
+    }
     if (!res.ok || typeof data.reply !== "string" || !data.reply.trim()) {
       throw new Error(data.error || "Tutor response request failed.");
     }
@@ -2610,15 +2784,24 @@ const TutorSession = {
     this.conversation = [];
   },
 
-  async sendMessage(text) {
-    return this._requestTutorReply(lessonId, text);
+  async sendMessage(text, attempt) {
+    return this._requestTutorReply(lessonId, text, attempt);
   },
 
-  async speakMessage(text) {
+  async speakMessage(text, attempt) {
     if (this.activeLessonId !== lessonId || !this.sessionId) {
       await this.connect(lessonId);
     }
-    return this._speakEcho(text);
+    if (!this.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor speech was superseded.", "AbortError");
+    }
+    this._setSpeechState("preparing");
+    const result = await this._speakEcho(text, { signal: attempt.signal });
+    if (!this.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor speech was superseded.", "AbortError");
+    }
+    this._startSpeakingMonitor();
+    return result;
   },
 };
 
@@ -2721,6 +2904,15 @@ function ensureTutorSessionConnected() {
     });
 }
 
+function stopTutorActivity() {
+  const interruptRequest = TutorSession.interruptSpeech().catch((err) => {
+    console.debug("[TutorSession] interrupt unavailable:", err);
+    return false;
+  });
+  TutorSession.cancelActiveMessage();
+  return interruptRequest;
+}
+
 function setTutorWidgetVisible(visible) {
   const widget = document.getElementById("tutor-chat-widget");
   const panel = document.getElementById("tutor-chat-panel");
@@ -2731,6 +2923,7 @@ function setTutorWidgetVisible(visible) {
     ensureTutorSessionConnected().catch(() => {});
     return;
   }
+  stopTutorActivity();
   panel.classList.add("hidden");
   videoEl.muted = true;
   tutorPanelOpen = false;
@@ -2826,6 +3019,7 @@ function toggleTutorChat() {
   const videoEl = document.getElementById("tutor-chat-avatar-video");
   const wasHidden = panel.classList.contains("hidden");
   if (!wasHidden) {
+    stopTutorActivity();
     panel.classList.add("hidden");
     videoEl.muted = true;
     resumeNarrationAfterTutor();
@@ -2841,30 +3035,43 @@ function toggleTutorChat() {
 
 async function sendTutorChatMessage() {
   const input = document.getElementById("tutor-chat-input");
-  const sendButton = document.getElementById("tutor-chat-send");
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
-  input.disabled = true;
-  sendButton.disabled = true;
+  const interruptRequest = TutorSession.interruptSpeech().catch((err) => {
+    console.debug("[TutorSession] immediate interrupt unavailable:", err);
+    return false;
+  });
+  const attempt = TutorSession.beginMessageAttempt();
   appendTutorChatBubble(text, "tutor-chat-bubble-user");
   const pendingReply = appendTutorChatBubble("Thinking...", "tutor-chat-bubble-agent");
+  TutorSession.registerPendingReply(attempt.id, pendingReply);
   const avatarReady = ensureTutorSessionConnected().then(
     () => null,
     (error) => error
   );
   let replyGenerated = false;
   try {
-    const reply = await TutorSession.sendMessage(text);
+    const reply = await TutorSession.sendMessage(text, attempt);
     replyGenerated = true;
+    TutorSession.resolvePendingReply(attempt.id);
     pendingReply.textContent = reply;
     scheduleTutorAvatarSizeUpdate();
 
     const connectionError = await avatarReady;
     if (connectionError) throw connectionError;
-    await TutorSession.speakMessage(reply);
+    if (!TutorSession.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor response was superseded.", "AbortError");
+    }
+    await interruptRequest;
+    await TutorSession.speakMessage(reply, attempt);
   } catch (err) {
+    const superseded = err?.name === "AbortError" || !TutorSession.isCurrentMessageAttempt(attempt.id);
+    if (superseded) return;
     console.error("[TutorSession] message send failed:", err);
+    TutorSession.resolvePendingReply(attempt.id);
+    TutorSession._stopSpeakingMonitor();
+    TutorSession._setSpeechState("idle");
     if (replyGenerated) {
       appendTutorChatBubble(
         "The response was generated, but avatar speech failed. Check that LiveTalking is running.",
@@ -2875,9 +3082,11 @@ async function sendTutorChatMessage() {
       pendingReply.classList.add("tutor-chat-bubble-error");
     }
   } finally {
-    input.disabled = false;
-    sendButton.disabled = false;
-    input.focus();
+    TutorSession.finishMessageAttempt(attempt.id, attempt.controller);
+    const panel = document.getElementById("tutor-chat-panel");
+    if (TutorSession.isCurrentMessageAttempt(attempt.id) && !panel.classList.contains("hidden")) {
+      input.focus();
+    }
   }
 }
 
@@ -2889,7 +3098,10 @@ document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
 });
 document.getElementById("tutor-chat-messages").addEventListener("scroll", scheduleTutorAvatarSizeUpdate);
 window.addEventListener("resize", scheduleTutorAvatarSizeUpdate);
-window.addEventListener("pagehide", () => TutorSession.disconnect());
+window.addEventListener("pagehide", () => {
+  stopTutorActivity();
+  TutorSession.disconnect();
+});
 
 // ─── Animations ───────────────────────────────────────────────────────────────
 /*
