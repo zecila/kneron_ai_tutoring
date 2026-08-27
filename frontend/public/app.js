@@ -23,6 +23,7 @@ let infoPanelOpen = false;
 let activeInfoElement = null;
 let selectedConcept = null;
 let pronounceAudio = null;          // separate from currentAudio — never touches narration playback
+let pronounceRequestId = 0;
 const pronounceCache = new Map();   // term text → blob URL
 const PRONOUNCE_CACHE_LIMIT = 10;
 
@@ -2533,6 +2534,7 @@ const TutorSession = {
   },
 
   disconnect() {
+    resumeTutorAvatarAfterInterrupt({ play: false });
     if (this.disconnecting) return Promise.resolve(false);
     this.disconnecting = true;
     const releaseRequest = this._avatarControl("disconnect", { keepalive: true }).catch((err) => {
@@ -2642,6 +2644,7 @@ const TutorSession = {
   },
 
   _startSpeakingMonitor() {
+    resumeTutorAvatarAfterInterrupt();
     this._stopSpeakingMonitor();
     const monitorId = this.speakingMonitorId;
     const startedAt = Date.now();
@@ -2940,7 +2943,7 @@ function setTutorWidgetVisible(visible) {
     ensureTutorSessionConnected().catch(() => {});
     return;
   }
-  setTutorRecordingShell(false, { focusInput: false });
+  stopTutorMicrophone({ focusInput: false });
   stopTutorActivity();
   panel.classList.add("hidden");
   videoEl.muted = true;
@@ -2970,6 +2973,7 @@ function isSlideshowVisible() {
 }
 
 function toggleNarrationFromControl(text, btn) {
+  if (tutorRecordingShellActive) stopTutorMicrophone({ focusInput: false });
   if (tutorPanelOpen) {
     const isPlaying = Boolean(currentAudio && !currentAudio.paused && !audioPaused);
     tutorAllowsNarration = !isPlaying;
@@ -3047,7 +3051,7 @@ function toggleTutorChat() {
   const videoEl = document.getElementById("tutor-chat-avatar-video");
   const wasHidden = panel.classList.contains("hidden");
   if (!wasHidden) {
-    setTutorRecordingShell(false, { focusInput: false });
+    stopTutorMicrophone({ focusInput: false });
     stopTutorActivity();
     panel.classList.add("hidden");
     videoEl.muted = true;
@@ -3063,30 +3067,258 @@ function toggleTutorChat() {
 }
 
 let tutorRecordingShellActive = false;
+let tutorMicrophoneAttemptId = 0;
+let tutorMicrophoneStream = null;
+let tutorMicrophoneContext = null;
+let tutorMicrophoneSource = null;
+let tutorMicrophoneAnalyser = null;
+let tutorMicrophoneLevelFrame = null;
+let tutorAvatarVisualInterruptId = 0;
+let tutorAvatarVisualInterruptTimer = null;
 
-function setTutorRecordingShell(active, { focusInput = true } = {}) {
+function setTutorRecordingShell(active, { focusInput = true, state = "recording" } = {}) {
   tutorRecordingShellActive = active;
   const shell = document.getElementById("tutor-chat-input-shell");
   const input = document.getElementById("tutor-chat-input");
   const micButton = document.getElementById("tutor-chat-mic");
   const recordingStatus = document.getElementById("tutor-chat-recording-status");
+  const recordingLabel = document.getElementById("tutor-chat-recording-label");
   const sendButton = document.getElementById("tutor-chat-send");
 
   shell.classList.toggle("is-recording", active);
+  shell.classList.toggle("is-requesting", active && state === "requesting");
   input.readOnly = active;
   micButton.setAttribute("aria-pressed", String(active));
   micButton.setAttribute("aria-label", active ? "Discard voice input" : "Start voice input");
   micButton.title = active ? "Discard voice input" : "Start voice input";
   recordingStatus.setAttribute("aria-hidden", String(!active));
+  recordingLabel.textContent = state === "requesting" ? "Starting microphone..." : "Listening...";
   sendButton.disabled = active;
 
   if (!active && focusInput) input.focus();
 }
 
-function toggleTutorRecordingShell() {
-  setTutorRecordingShell(!tutorRecordingShellActive, {
-    focusInput: tutorRecordingShellActive,
+function pauseSlideNarrationForMicrophone() {
+  if (autoPlayTimer) {
+    clearTimeout(autoPlayTimer);
+    autoPlayTimer = null;
+  }
+  ttsRequestId++;
+
+  if (currentAudio && !currentAudio.paused) currentAudio.pause();
+  if (currentAudio) audioPaused = true;
+
+  tutorAllowsNarration = false;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  setNarrationButtonPlaying(false);
+
+  const btn = document.getElementById("tts-narrate-btn");
+  const notes = slides[current]?.speaker_notes;
+  if (btn && notes) {
+    btn.disabled = false;
+    btn.onclick = () => toggleNarrationFromControl(notes, btn);
+  }
+}
+
+function stopPronunciationForMicrophone() {
+  pronounceRequestId++;
+  if (pronounceAudio) {
+    pronounceAudio.pause();
+    pronounceAudio = null;
+  }
+  document.querySelectorAll(".info-pronounce-btn.tts-speaking")
+    .forEach((btn) => btn.classList.remove("tts-speaking"));
+}
+
+function stopTutorAudioForMicrophone() {
+  freezeTutorAvatarUntilIdle();
+  pauseSlideNarrationForMicrophone();
+  stopPronunciationForMicrophone();
+  stopTutorActivity().catch((err) => {
+    console.debug("[TutorMicrophone] tutor interrupt unavailable:", err);
   });
+}
+
+function updateTutorMicrophoneLevel() {
+  if (!tutorMicrophoneAnalyser || !tutorRecordingShellActive) return;
+
+  const samples = new Float32Array(tutorMicrophoneAnalyser.fftSize);
+  const meter = document.querySelector(".tutor-recording-level");
+  const drawLevel = () => {
+    if (!tutorMicrophoneAnalyser || !tutorRecordingShellActive) return;
+    tutorMicrophoneAnalyser.getFloatTimeDomainData(samples);
+    let sumSquares = 0;
+    for (const sample of samples) sumSquares += sample * sample;
+    const level = Math.min(1, Math.sqrt(sumSquares / samples.length) * 6);
+    meter.style.setProperty("--tutor-mic-level", `${Math.max(4, level * 100)}%`);
+    tutorMicrophoneLevelFrame = requestAnimationFrame(drawLevel);
+  };
+  drawLevel();
+}
+
+function resumeTutorAvatarAfterInterrupt({ play = true } = {}) {
+  tutorAvatarVisualInterruptId++;
+  if (tutorAvatarVisualInterruptTimer !== null) {
+    clearTimeout(tutorAvatarVisualInterruptTimer);
+    tutorAvatarVisualInterruptTimer = null;
+  }
+
+  const avatar = document.getElementById("tutor-chat-avatar");
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  avatar?.removeAttribute("data-visually-interrupted");
+  if (!play || !videoEl || document.getElementById("tutor-chat-panel")?.classList.contains("hidden")) return;
+  videoEl.play().catch((err) => console.debug("Tutor avatar playback resume deferred:", err));
+}
+
+function freezeTutorAvatarUntilIdle() {
+  if (!["preparing", "speaking"].includes(TutorSession.speechState)) return;
+
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  const avatar = document.getElementById("tutor-chat-avatar");
+  if (!videoEl || !avatar) return;
+
+  const interruptId = ++tutorAvatarVisualInterruptId;
+  const startedAt = Date.now();
+  let idleChecks = 0;
+  if (tutorAvatarVisualInterruptTimer !== null) clearTimeout(tutorAvatarVisualInterruptTimer);
+  avatar.dataset.visuallyInterrupted = "true";
+  videoEl.pause();
+
+  const waitForIdle = async () => {
+    if (interruptId !== tutorAvatarVisualInterruptId) return;
+    try {
+      const speaking = await TutorSession._getSpeakingState();
+      if (interruptId !== tutorAvatarVisualInterruptId) return;
+      if (!speaking) {
+        idleChecks++;
+        if (idleChecks >= TUTOR_SPEAKING_IDLE_CONFIRMATIONS) {
+          resumeTutorAvatarAfterInterrupt();
+          return;
+        }
+      } else {
+        idleChecks = 0;
+      }
+    } catch (err) {
+      console.debug("[TutorMicrophone] avatar idle status unavailable:", err);
+    }
+
+    if (Date.now() - startedAt >= 6000) {
+      resumeTutorAvatarAfterInterrupt();
+      return;
+    }
+    tutorAvatarVisualInterruptTimer = setTimeout(waitForIdle, TUTOR_SPEAKING_POLL_INTERVAL_MS);
+  };
+  tutorAvatarVisualInterruptTimer = setTimeout(waitForIdle, TUTOR_SPEAKING_POLL_INTERVAL_MS);
+}
+
+function releaseTutorMicrophoneResources() {
+  if (tutorMicrophoneLevelFrame !== null) {
+    cancelAnimationFrame(tutorMicrophoneLevelFrame);
+    tutorMicrophoneLevelFrame = null;
+  }
+  const source = tutorMicrophoneSource;
+  const analyser = tutorMicrophoneAnalyser;
+  const stream = tutorMicrophoneStream;
+  const context = tutorMicrophoneContext;
+  tutorMicrophoneStream = null;
+  tutorMicrophoneContext = null;
+  tutorMicrophoneSource = null;
+  tutorMicrophoneAnalyser = null;
+
+  try { source?.disconnect(); } catch {}
+  try { analyser?.disconnect(); } catch {}
+  stream?.getTracks().forEach((track) => {
+    try { track.stop(); } catch {}
+  });
+  context?.close().catch(() => {});
+  document.querySelector(".tutor-recording-level")?.style.removeProperty("--tutor-mic-level");
+}
+
+function stopTutorMicrophone({ focusInput = true } = {}) {
+  tutorMicrophoneAttemptId++;
+  releaseTutorMicrophoneResources();
+  setTutorRecordingShell(false, { focusInput });
+}
+
+function microphoneErrorMessage(err) {
+  if (err?.name === "NotAllowedError" || err?.name === "SecurityError") {
+    return "Microphone access was blocked. Allow microphone access and try again.";
+  }
+  if (err?.name === "NotFoundError") return "No microphone was found.";
+  if (err?.name === "NotReadableError") return "The microphone is already in use by another application.";
+  return "Could not start the microphone. Please try again.";
+}
+
+async function startTutorMicrophone() {
+  if (tutorRecordingShellActive) return;
+
+  const attemptId = ++tutorMicrophoneAttemptId;
+  stopTutorAudioForMicrophone();
+  setTutorRecordingShell(true, { focusInput: false, state: "requesting" });
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    stopTutorMicrophone();
+    showToast("Microphone access is not supported in this browser.");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+
+    if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error("Web Audio is not supported.");
+    }
+
+    tutorMicrophoneStream = stream;
+    tutorMicrophoneContext = new AudioContextClass();
+    tutorMicrophoneSource = tutorMicrophoneContext.createMediaStreamSource(stream);
+    tutorMicrophoneAnalyser = tutorMicrophoneContext.createAnalyser();
+    tutorMicrophoneAnalyser.fftSize = 512;
+    tutorMicrophoneAnalyser.smoothingTimeConstant = 0.7;
+    tutorMicrophoneSource.connect(tutorMicrophoneAnalyser);
+    await tutorMicrophoneContext.resume();
+
+    if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) return;
+
+    stream.getAudioTracks().forEach((track) => {
+      track.addEventListener("ended", () => {
+        if (tutorMicrophoneStream !== stream) return;
+        stopTutorMicrophone();
+        showToast("The microphone disconnected.");
+      }, { once: true });
+    });
+    setTutorRecordingShell(true, { focusInput: false, state: "recording" });
+    updateTutorMicrophoneLevel();
+  } catch (err) {
+    if (attemptId !== tutorMicrophoneAttemptId) return;
+    console.error("[TutorMicrophone] start failed:", err);
+    stopTutorMicrophone();
+    showToast(microphoneErrorMessage(err));
+  }
+}
+
+function toggleTutorMicrophone() {
+  if (tutorRecordingShellActive) {
+    stopTutorMicrophone();
+    return;
+  }
+  startTutorMicrophone();
 }
 
 async function sendTutorChatMessage() {
@@ -3150,13 +3382,14 @@ async function sendTutorChatMessage() {
 document.getElementById("tutor-chat-toggle").addEventListener("click", toggleTutorChat);
 document.getElementById("tutor-chat-close").addEventListener("click", toggleTutorChat);
 document.getElementById("tutor-chat-send").addEventListener("click", sendTutorChatMessage);
-document.getElementById("tutor-chat-mic").addEventListener("click", toggleTutorRecordingShell);
+document.getElementById("tutor-chat-mic").addEventListener("click", toggleTutorMicrophone);
 document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendTutorChatMessage();
 });
 document.getElementById("tutor-chat-messages").addEventListener("scroll", scheduleTutorAvatarSizeUpdate);
 window.addEventListener("resize", scheduleTutorAvatarSizeUpdate);
 window.addEventListener("pagehide", () => {
+  stopTutorMicrophone({ focusInput: false });
   stopTutorActivity();
   TutorSession.disconnect();
 });
@@ -3885,6 +4118,8 @@ function renderDefinitionCard(data) {
 }
 
 async function pronounceTerm(text, btn) {
+  if (tutorRecordingShellActive) stopTutorMicrophone({ focusInput: false });
+  const requestId = ++pronounceRequestId;
   if (pronounceAudio) {
     pronounceAudio.pause();
     pronounceAudio = null;
@@ -3897,7 +4132,7 @@ async function pronounceTerm(text, btn) {
     // Move to most-recent end (LRU touch)
     pronounceCache.delete(text);
     pronounceCache.set(text, cached);
-    playPronunciation(cached, btn);
+    if (requestId === pronounceRequestId) playPronunciation(cached, btn);
     return;
   }
 
@@ -3921,7 +4156,7 @@ async function pronounceTerm(text, btn) {
       pronounceCache.delete(oldestKey);
     }
 
-    playPronunciation(url, btn);
+    if (requestId === pronounceRequestId) playPronunciation(url, btn);
   } catch (err) {
     console.error(err);
   } finally {

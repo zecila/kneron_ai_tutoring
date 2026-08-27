@@ -3260,22 +3260,27 @@ html, body {
 }
 
 .tutor-recording-level {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  height: 16px;
+  display: block;
+  flex: 0 1 96px;
+  width: 96px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgb(220 38 38 / 18%);
 }
 
-.tutor-recording-level span {
-  width: 2px;
-  height: 5px;
-  border-radius: 1px;
+.tutor-recording-level-fill {
+  display: block;
+  width: var(--tutor-mic-level, 4%);
+  height: 100%;
+  border-radius: inherit;
   background: currentColor;
-  animation: tutor-recording-level 720ms ease-in-out infinite alternate;
+  transition: width 80ms linear;
 }
 
-.tutor-recording-level span:nth-child(2) { animation-delay: 160ms; }
-.tutor-recording-level span:nth-child(3) { animation-delay: 320ms; }
+#tutor-chat-input-shell.is-requesting .tutor-recording-level {
+  opacity: 0.35;
+}
 
 #tutor-chat-mic {
   position: absolute;
@@ -3337,16 +3342,12 @@ html, body {
   50% { opacity: 0.45; transform: scale(0.75); }
 }
 
-@keyframes tutor-recording-level {
-  from { height: 4px; }
-  to { height: 14px; }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .tutor-recording-dot,
-  .tutor-recording-level span {
+  .tutor-recording-dot {
     animation: none;
   }
+
+  .tutor-recording-level-fill { transition: none; }
 }
 
 
