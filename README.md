@@ -54,6 +54,11 @@ Set these in `backend/.env`:
 | `FLASK_SECRET_KEY` | Signs session cookies — keep this stable across restarts, or existing users get logged out |
 | `LLM_BASE_URL` | Base URL for the LLM API (supports OpenAI-compatible endpoints) |
 | `TTS_BASE_URL` | Base URL for the text-to-speech service backing `/api/tts` |
+| `TTS_MODEL` | Narration TTS model. Defaults to `indextts1.5` |
+| `TTS_VERSION` | Narration TTS model version/voice. Defaults to `kneo350` |
+| `TUTOR_TTS_MODEL` | Tutor avatar TTS model. Defaults to `TTS_MODEL` |
+| `TUTOR_TTS_VERSION` | Tutor avatar TTS model version/voice. Defaults to `TTS_VERSION` |
+| `TTS_MAX_CHARS_PER_REQUEST` | Maximum text sent in one TTS request. Longer narration and tutor replies are merged from WAV chunks. Defaults to `500` |
 | `REDIS_URL` | Already set in `docker-compose.yml` to `redis://redis:6379` — no action needed unless running outside Compose |
 | `FLASK_ENV` | `development` or `production`. Compose defaults to `development` unless overridden — set `FLASK_ENV=production` in your shell or `.env` before `up` for a production-style run |
 

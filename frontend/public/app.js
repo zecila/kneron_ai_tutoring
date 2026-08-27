@@ -2433,6 +2433,7 @@ const TutorSession = {
   async _connect(activeLessonId) {
     const videoEl = document.getElementById("tutor-chat-avatar-video");
     if (!videoEl) throw new Error("Tutor avatar video element is missing.");
+    videoEl.muted = true;
 
     const pc = new RTCPeerConnection({ sdpSemantics: "unified-plan" });
 
@@ -2557,7 +2558,7 @@ const TutorSession = {
     return releaseRequest.then((data) => data?.ok === true);
   },
 
-  async _speakEcho(text, { interrupt = true, signal } = {}) {
+  async _speakEcho(text, { attemptId, interrupt = true, signal } = {}) {
     if (!this.activeLessonId || !this.sessionId) {
       throw new Error("Tutor avatar is not connected.");
     }
@@ -2572,6 +2573,7 @@ const TutorSession = {
           sessionid: this.sessionId,
           text,
           interrupt,
+          attempt_id: attemptId,
         }),
       }
     );
@@ -2586,6 +2588,14 @@ const TutorSession = {
     this.speechState = state;
     const avatar = document.getElementById("tutor-chat-avatar");
     if (avatar) avatar.dataset.speechState = state;
+    this._syncAudioMute();
+  },
+
+  _syncAudioMute() {
+    const panel = document.getElementById("tutor-chat-panel");
+    const videoEl = document.getElementById("tutor-chat-avatar-video");
+    if (!panel || !videoEl) return;
+    videoEl.muted = panel.classList.contains("hidden") || this.speechState !== "speaking";
   },
 
   _stopSpeakingMonitor() {
@@ -2596,10 +2606,13 @@ const TutorSession = {
     }
   },
 
-  async _avatarControl(action, { keepalive = false } = {}) {
+  async _avatarControl(action, { attemptId = null, keepalive = false } = {}) {
     const activeLessonId = this.activeLessonId;
     const avatarSessionId = this.sessionId;
     if (!activeLessonId || !avatarSessionId) return null;
+
+    const payload = { sessionid: avatarSessionId };
+    if (Number.isInteger(attemptId)) payload.attempt_id = attemptId;
 
     const res = await fetch(
       `/api/lessons/${encodeURIComponent(activeLessonId)}/avatar/${action}`,
@@ -2607,7 +2620,7 @@ const TutorSession = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         keepalive,
-        body: JSON.stringify({ sessionid: avatarSessionId }),
+        body: JSON.stringify(payload),
       }
     );
     const data = await res.json().catch(() => ({}));
@@ -2615,10 +2628,10 @@ const TutorSession = {
     return data;
   },
 
-  async interruptSpeech() {
+  async interruptSpeech(attemptId = this.messageAttempt, { preserveState = false } = {}) {
     this._stopSpeakingMonitor();
-    this._setSpeechState("idle");
-    const data = await this._avatarControl("interrupt");
+    if (!preserveState) this._setSpeechState("idle");
+    const data = await this._avatarControl("interrupt", { attemptId });
     return data?.ok === true;
   },
 
@@ -2796,7 +2809,11 @@ const TutorSession = {
       throw new DOMException("Tutor speech was superseded.", "AbortError");
     }
     this._setSpeechState("preparing");
-    const result = await this._speakEcho(text, { signal: attempt.signal });
+    const result = await this._speakEcho(text, {
+      attemptId: attempt.id,
+      interrupt: true,
+      signal: attempt.signal,
+    });
     if (!this.isCurrentMessageAttempt(attempt.id)) {
       throw new DOMException("Tutor speech was superseded.", "AbortError");
     }
@@ -2905,11 +2922,11 @@ function ensureTutorSessionConnected() {
 }
 
 function stopTutorActivity() {
-  const interruptRequest = TutorSession.interruptSpeech().catch((err) => {
+  TutorSession.cancelActiveMessage();
+  const interruptRequest = TutorSession.interruptSpeech(TutorSession.messageAttempt).catch((err) => {
     console.debug("[TutorSession] interrupt unavailable:", err);
     return false;
   });
-  TutorSession.cancelActiveMessage();
   return interruptRequest;
 }
 
@@ -2919,7 +2936,7 @@ function setTutorWidgetVisible(visible) {
   const videoEl = document.getElementById("tutor-chat-avatar-video");
   widget.classList.toggle("hidden", !visible);
   if (visible) {
-    videoEl.muted = panel.classList.contains("hidden");
+    TutorSession._syncAudioMute();
     ensureTutorSessionConnected().catch(() => {});
     return;
   }
@@ -2944,6 +2961,11 @@ function setNarrationButtonPlaying(playing) {
   if (!btn) return;
   btn.textContent = playing ? "■" : "▶";
   btn.classList.toggle("tts-btn-active", playing);
+}
+
+function isSlideshowVisible() {
+  const slideshow = document.getElementById("slideshow");
+  return Boolean(slideshow && !slideshow.classList.contains("hidden"));
 }
 
 function toggleNarrationFromControl(text, btn) {
@@ -2994,6 +3016,11 @@ function resumeNarrationAfterTutor() {
   tutorDeferredNarration = false;
   tutorAllowsNarration = false;
 
+  if (!isSlideshowVisible()) {
+    setNarrationButtonPlaying(false);
+    return;
+  }
+
   if (shouldResume && currentAudio && audioPaused) {
     const audioToResume = currentAudio;
     audioPaused = false;
@@ -3027,7 +3054,7 @@ function toggleTutorChat() {
   }
   panel.classList.remove("hidden");
   pauseNarrationForTutor();
-  videoEl.muted = false;
+  TutorSession._syncAudioMute();
   videoEl.play().catch((err) => console.debug("Tutor avatar playback deferred:", err));
   scheduleTutorAvatarSizeUpdate();
   ensureTutorSessionConnected().catch(() => {});
@@ -3038,11 +3065,11 @@ async function sendTutorChatMessage() {
   const text = input.value.trim();
   if (!text) return;
   input.value = "";
-  const interruptRequest = TutorSession.interruptSpeech().catch((err) => {
+  const attempt = TutorSession.beginMessageAttempt();
+  const interruptRequest = TutorSession.interruptSpeech(attempt.id, { preserveState: true }).catch((err) => {
     console.debug("[TutorSession] immediate interrupt unavailable:", err);
     return false;
   });
-  const attempt = TutorSession.beginMessageAttempt();
   appendTutorChatBubble(text, "tutor-chat-bubble-user");
   const pendingReply = appendTutorChatBubble("Thinking...", "tutor-chat-bubble-agent");
   TutorSession.registerPendingReply(attempt.id, pendingReply);
@@ -3074,7 +3101,7 @@ async function sendTutorChatMessage() {
     TutorSession._setSpeechState("idle");
     if (replyGenerated) {
       appendTutorChatBubble(
-        "The response was generated, but avatar speech failed. Check that LiveTalking is running.",
+        "The response was generated, but speech failed. Check the TTS service and LiveTalking.",
         "tutor-chat-bubble-agent tutor-chat-bubble-error"
       );
     } else {
@@ -3375,6 +3402,11 @@ async function prefetchTTS(text) {
 }
 
 async function speakNotes(text, btn) {
+  if (!isSlideshowVisible()) {
+    setNarrationButtonPlaying(false);
+    return;
+  }
+
   // if playing → pause
   if (currentAudio && !audioPaused) {
     currentAudio.pause();
@@ -3616,6 +3648,11 @@ function setNotesVisible(visible) {
   panel.classList.toggle("hidden", !visible);
   btn.classList.toggle("notes-active", visible);
 
+  scaler.style.transform = "";
+  scaler.style.marginBottom = "";
+
+  if (!isSlideshowVisible()) return;
+
   if (visible) {
     const stageH    = stage.getBoundingClientRect().height;
     const stageW    = stage.getBoundingClientRect().width - 48;
@@ -3628,12 +3665,12 @@ function setNotesVisible(visible) {
     const scaleByW    = stageW / slideW;
     const scale       = Math.min(baseScale, scaleByH, scaleByW);
 
+    if (!Number.isFinite(scale) || scale <= 0) return;
+
     scaler.style.transform       = `scale(${scale})`;
     scaler.style.transformOrigin = "top center";
     scaler.style.marginBottom    = `${-(slideH * (1 - scale))}px`;
   } else {
-    scaler.style.transform    = "";
-    scaler.style.marginBottom = "";
     fitSlideToStage();   // restore the window-fit scale
   }
 }
@@ -4102,6 +4139,18 @@ function switchScene(name) {
 
   const inLesson = name === "slideshow" || name === "study";
   setTutorWidgetVisible(inLesson);
+
+  if (name === "slideshow") {
+    requestAnimationFrame(() => {
+      const activeSlide = document.querySelector("#slide-container .slide.active");
+      if (activeSlide) {
+        fitSlideTitle(activeSlide);
+        fitSlideContent(activeSlide);
+      }
+      fitSlideToStage();
+      if (notesVisible) setNotesVisible(true);
+    });
+  }
 
 
   if (name === "progress") {

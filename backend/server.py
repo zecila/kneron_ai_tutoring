@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import re
 import uuid
@@ -9,6 +10,8 @@ import threading
 import traceback
 import time
 import glob
+import wave
+from contextlib import contextmanager
 from queue import Empty, Queue
 from datetime import timedelta, datetime, timezone
 from flask import Flask, jsonify, send_from_directory, request, Response, session
@@ -18,6 +21,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import HTTPException
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from redis import Redis
+from redis.exceptions import RedisError
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -1003,25 +1008,179 @@ def handle_error(e):
 
     
 # ── Text to Speech ───────────────────────────────────────────────────────────────
-TTS_BASE = os.environ["TTS_BASE_URL"]
-TTS_MODEL = "indextts1.5"
-TTS_VERSION = "kneo350"
+TTS_BASE = os.environ["TTS_BASE_URL"].rstrip("/")
+TTS_MODEL = os.environ.get("TTS_MODEL", "indextts1.5")
+TTS_VERSION = os.environ.get("TTS_VERSION", "kneo350")
+TUTOR_TTS_MODEL = os.environ.get("TUTOR_TTS_MODEL", TTS_MODEL)
+TUTOR_TTS_VERSION = os.environ.get("TUTOR_TTS_VERSION", TTS_VERSION)
+TTS_MAX_CHARS_PER_REQUEST = max(100, int(os.environ.get("TTS_MAX_CHARS_PER_REQUEST", "500")))
+TTS_MAX_RETRIES = 2
+
+
+class TTSServiceError(Exception):
+    def __init__(self, message, upstream=None, status_code=None):
+        super().__init__(message)
+        self.upstream = upstream
+        self.status_code = status_code
+
+
+class TutorSpeechSuperseded(Exception):
+    pass
+
+
+def _configured_tts_models():
+    models = []
+    seen = set()
+    for model_name, version in (
+        (TTS_MODEL, TTS_VERSION),
+        (TUTOR_TTS_MODEL, TUTOR_TTS_VERSION),
+    ):
+        key = (model_name, version)
+        if key not in seen:
+            seen.add(key)
+            models.append(key)
+    return models
+
+
+def _split_tts_text(text, max_chars=None):
+    max_chars = max_chars or TTS_MAX_CHARS_PER_REQUEST
+    remaining = re.sub(r"\s+", " ", text).strip()
+    chunks = []
+
+    while len(remaining) > max_chars:
+        window = remaining[:max_chars + 1]
+        sentence_cuts = [
+            match.end()
+            for match in re.finditer(r"[.!?](?:\s+|$)", window)
+            if match.end() <= max_chars
+        ]
+        cut = sentence_cuts[-1] if sentence_cuts and sentence_cuts[-1] >= max_chars // 2 else None
+        if cut is None:
+            word_cuts = [match.start() for match in re.finditer(r"\s+", window) if match.start() <= max_chars]
+            cut = word_cuts[-1] if word_cuts else max_chars
+
+        chunk = remaining[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _request_tts_wav_chunk(text, model_name, version, chunk_number, chunk_count):
+    last_err = None
+
+    for attempt in range(TTS_MAX_RETRIES + 1):
+        try:
+            r = requests.post(
+                f"{TTS_BASE}/audio/tts",
+                json={
+                    "text": text,
+                    "output_format": "audio",
+                    "model_name": model_name,
+                    "version": version
+                },
+                timeout=30
+            )
+            r.raise_for_status()
+            return r.content
+        except requests.exceptions.ChunkedEncodingError as e:
+            last_err = e
+            retrying = attempt < TTS_MAX_RETRIES
+            app.logger.warning(
+                f"TTS chunk {chunk_number}/{chunk_count} attempt {attempt + 1} "
+                f"dropped mid-stream{', retrying' if retrying else ''}: {e}"
+            )
+            continue
+        except requests.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else None
+            upstream = e.response.text if e.response is not None else None
+            app.logger.error(f"TTS upstream error: {status_code} - {upstream}")
+            raise TTSServiceError("TTS service unavailable", upstream=upstream, status_code=status_code) from e
+        except requests.RequestException as e:
+            app.logger.error(f"TTS request failed: {type(e).__name__}: {e}")
+            raise TTSServiceError("TTS service unavailable") from e
+
+    app.logger.error(
+        f"TTS chunk {chunk_number}/{chunk_count} failed after "
+        f"{TTS_MAX_RETRIES + 1} attempts: {last_err}"
+    )
+    raise TTSServiceError("TTS service unstable") from last_err
+
+
+def _merge_tts_wav_chunks(wav_chunks):
+    if len(wav_chunks) == 1:
+        return wav_chunks[0]
+
+    audio_format = None
+    frame_chunks = []
+    try:
+        for wav_bytes in wav_chunks:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as source:
+                chunk_format = (
+                    source.getnchannels(),
+                    source.getsampwidth(),
+                    source.getframerate(),
+                    source.getcomptype(),
+                    source.getcompname(),
+                )
+                if audio_format is None:
+                    audio_format = chunk_format
+                elif chunk_format != audio_format:
+                    raise TTSServiceError("TTS chunks returned incompatible WAV formats")
+                frame_chunks.append(source.readframes(source.getnframes()))
+    except (EOFError, wave.Error) as e:
+        raise TTSServiceError("TTS service returned an invalid WAV file") from e
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as merged:
+        channels, sample_width, frame_rate, compression_type, compression_name = audio_format
+        merged.setnchannels(channels)
+        merged.setsampwidth(sample_width)
+        merged.setframerate(frame_rate)
+        merged.setcomptype(compression_type, compression_name)
+        for frames in frame_chunks:
+            merged.writeframes(frames)
+    return output.getvalue()
+
+
+def _synthesize_tts_wav(text, model_name=None, version=None, should_continue=None):
+    model_name = model_name or TTS_MODEL
+    version = version or TTS_VERSION
+    text_chunks = _split_tts_text(text)
+    if not text_chunks:
+        raise TTSServiceError("No text provided for TTS")
+
+    if len(text_chunks) > 1:
+        app.logger.info(f"Splitting {len(text)} TTS characters into {len(text_chunks)} WAV chunks")
+
+    wav_chunks = []
+    for index, chunk in enumerate(text_chunks, start=1):
+        if should_continue is not None and not should_continue():
+            raise TutorSpeechSuperseded()
+        wav_chunks.append(
+            _request_tts_wav_chunk(chunk, model_name, version, index, len(text_chunks))
+        )
+        if should_continue is not None and not should_continue():
+            raise TutorSpeechSuperseded()
+    return _merge_tts_wav_chunks(wav_chunks)
+
 
 def init_tts():
-    try:
-        r = requests.post(f"{TTS_BASE}/init_model", json={
-            "model_name": TTS_MODEL,
-            "version": TTS_VERSION
-        })
-        if not r.ok:
-            print(f"TTS init failed: {r.status_code} - {r.text}")
-        r.raise_for_status()
-        print("TTS model initialized")
-    except Exception as e:
-        print(f"TTS init failed: {e}")
-
-
-TTS_MAX_RETRIES = 2
+    for model_name, version in _configured_tts_models():
+        try:
+            r = requests.post(f"{TTS_BASE}/init_model", json={
+                "model_name": model_name,
+                "version": version
+            })
+            if not r.ok:
+                print(f"TTS init failed: {r.status_code} - {r.text}")
+            r.raise_for_status()
+            print(f"TTS model initialized: {model_name}/{version}")
+        except Exception as e:
+            print(f"TTS init failed for {model_name}/{version}: {e}")
 
 @app.route("/api/tts", methods=["POST"])
 @limiter.limit("120 per hour")
@@ -1031,34 +1190,13 @@ def tts():
         return jsonify({"error": "No text provided"}), 400
     app.logger.info(f"TTS request: {len(text)} chars")
 
-    last_err = None
-    for attempt in range(TTS_MAX_RETRIES + 1):
-        try:
-            r = requests.post(
-                f"{TTS_BASE}/audio/tts",
-                json={
-                    "text": text,
-                    "output_format": "audio",
-                    "model_name": TTS_MODEL,
-                    "version": TTS_VERSION
-                },
-                timeout=30
-            )
-            r.raise_for_status()
-            return Response(r.content, mimetype="audio/wav")
-        except requests.exceptions.ChunkedEncodingError as e:
-            last_err = e
-            app.logger.warning(f"TTS attempt {attempt+1} dropped mid-stream, retrying: {e}")
-            continue
-        except requests.HTTPError as e:
-            app.logger.error(f"TTS upstream error: {e.response.status_code} - {e.response.text}")
-            return jsonify({"error": "TTS service unavailable", "upstream": e.response.text}), 502
-        except Exception as e:
-            app.logger.error(f"TTS request failed: {type(e).__name__}: {e}")
-            return jsonify({"error": str(e)}), 500
-
-    app.logger.error(f"TTS failed after {TTS_MAX_RETRIES+1} attempts: {last_err}")
-    return jsonify({"error": "TTS service unstable"}), 502
+    try:
+        return Response(_synthesize_tts_wav(text), mimetype="audio/wav")
+    except TTSServiceError as e:
+        body = {"error": str(e)}
+        if e.upstream is not None:
+            body["upstream"] = e.upstream
+        return jsonify(body), 502
 
 
 # ── Avatar (OpenAvatarChat) LLM proxy ──────────────────────────────────────────
@@ -1493,10 +1631,19 @@ LIVETALKING_BASE_URL = os.environ.get("LIVETALKING_BASE_URL", "http://127.0.0.1:
 LIVETALKING_SIGNALING_TIMEOUT = int(os.environ.get("LIVETALKING_SIGNALING_TIMEOUT", "60"))
 LIVETALKING_COMMAND_TIMEOUT = int(os.environ.get("LIVETALKING_COMMAND_TIMEOUT", "15"))
 LIVETALKING_MAX_TEXT_LENGTH = 2000
+TUTOR_ATTEMPT_TTL_SECONDS = 3600
 TUTOR_CHAT_MODEL = os.environ.get("TUTOR_CHAT_MODEL", "gpt-5.4-mini")
 TUTOR_CHAT_HISTORY_LIMIT = 12
 TUTOR_CHAT_HISTORY_MAX_LENGTH = 12000
 TUTOR_CONTEXT_CONCEPT_LIMIT = 5
+_tutor_attempt_lock = threading.RLock()
+_tutor_attempts = {}
+_redis_url = os.environ.get("REDIS_URL", "memory://")
+_tutor_attempt_redis = (
+    Redis.from_url(_redis_url, decode_responses=True)
+    if _redis_url.startswith(("redis://", "rediss://"))
+    else None
+)
 TUTOR_CHAT_SYSTEM_PROMPT = (
     "You are the tutoring agent for the learner's current lesson. Ground answers in the supplied lesson "
     "context and prioritize the current slide or active study concept when the learner uses words like "
@@ -1870,10 +2017,21 @@ def _normalize_tutor_speech_text(text):
             exponent = "negative " + exponent[1:]
         return " to the power of " + exponent
 
+    speech = text.strip()
+    standalone_symbol = {
+        "-": "minus",
+        "−": "minus",
+        "<": "less than",
+        ">": "greater than",
+    }.get(speech)
+    if standalone_symbol:
+        return standalone_symbol
+
+    speech = speech.replace("`", "")
     speech = re.sub(
         r"\b(?P<unit>mm|cm|km|m|in|ft|yd|mi)\s*(?:\^(?:\{)?(?P<power>2|3)(?:\})?|(?P<power_unicode>[²³]))",
         replace_unit_power,
-        text,
+        speech,
     )
     speech = re.sub(r"\^\s*(?:\{\s*)?2\s*(?:\})?", " squared", speech)
     speech = re.sub(r"\^\s*(?:\{\s*)?3\s*(?:\})?", " cubed", speech)
@@ -1889,13 +2047,20 @@ def _normalize_tutor_speech_text(text):
     )
     speech = speech.replace("°C", " degrees Celsius").replace("°F", " degrees Fahrenheit")
     speech = speech.replace("°", " degrees")
+    speech = re.sub(r"(?<=\d)\s*[-−]\s*(?=\d)", " minus ", speech)
+    speech = re.sub(r"(?<![\w)])[-−]\s*(?=\d)", " negative ", speech)
+    speech = re.sub(r"(?<![A-Za-z0-9])[-−](?![A-Za-z0-9])", " minus ", speech)
     for symbol, spoken in {
         "×": " times ",
         "÷": " divided by ",
         "≠": " does not equal ",
         "≤": " is less than or equal to ",
         "≥": " is greater than or equal to ",
+        "<=": " is less than or equal to ",
+        ">=": " is greater than or equal to ",
         "=": " equals ",
+        "<": " is less than ",
+        ">": " is greater than ",
         "%": " percent",
     }.items():
         speech = speech.replace(symbol, spoken)
@@ -1909,13 +2074,7 @@ class LiveTalkingCommandError(Exception):
     pass
 
 
-def _post_livetalking_command(path, payload):
-    upstream = requests.post(
-        f"{LIVETALKING_BASE_URL}{path}",
-        json=payload,
-        timeout=LIVETALKING_COMMAND_TIMEOUT,
-    )
-    upstream.raise_for_status()
+def _parse_livetalking_command_response(upstream):
     try:
         result = upstream.json()
     except ValueError as e:
@@ -1931,6 +2090,27 @@ def _post_livetalking_command(path, payload):
     return result
 
 
+def _post_livetalking_command(path, payload):
+    upstream = requests.post(
+        f"{LIVETALKING_BASE_URL}{path}",
+        json=payload,
+        timeout=LIVETALKING_COMMAND_TIMEOUT,
+    )
+    upstream.raise_for_status()
+    return _parse_livetalking_command_response(upstream)
+
+
+def _post_livetalking_audio(avatar_session_id, wav_bytes):
+    upstream = requests.post(
+        f"{LIVETALKING_BASE_URL}/humanaudio",
+        data={"sessionid": avatar_session_id},
+        files={"file": ("tutor.wav", wav_bytes, "audio/wav")},
+        timeout=LIVETALKING_COMMAND_TIMEOUT,
+    )
+    upstream.raise_for_status()
+    return _parse_livetalking_command_response(upstream)
+
+
 def _avatar_session_id_from_body(body):
     avatar_session_id = body.get("sessionid") if isinstance(body, dict) else None
     if not isinstance(avatar_session_id, str) or not re.fullmatch(
@@ -1938,6 +2118,69 @@ def _avatar_session_id_from_body(body):
     ):
         return None
     return avatar_session_id
+
+
+def _avatar_attempt_id_from_body(body):
+    attempt_id = body.get("attempt_id") if isinstance(body, dict) else None
+    if isinstance(attempt_id, bool) or not isinstance(attempt_id, int) or attempt_id < 1:
+        return None
+    return attempt_id
+
+
+def _tutor_attempt_key(avatar_session_id):
+    return f"kneron:tutor-attempt:{avatar_session_id}"
+
+
+@contextmanager
+def _tutor_attempt_guard(avatar_session_id):
+    if _tutor_attempt_redis is not None:
+        lock = _tutor_attempt_redis.lock(
+            _tutor_attempt_key(avatar_session_id) + ":lock",
+            timeout=30,
+            blocking_timeout=10,
+        )
+        if not lock.acquire(blocking=True):
+            raise RedisError("Timed out waiting for tutor attempt lock")
+        try:
+            yield
+        finally:
+            lock.release()
+        return
+    with _tutor_attempt_lock:
+        yield
+
+
+def _set_current_tutor_attempt(avatar_session_id, attempt_id):
+    value = str(attempt_id)
+    if _tutor_attempt_redis is not None:
+        _tutor_attempt_redis.set(
+            _tutor_attempt_key(avatar_session_id),
+            value,
+            ex=TUTOR_ATTEMPT_TTL_SECONDS,
+        )
+        return
+    with _tutor_attempt_lock:
+        _tutor_attempts[avatar_session_id] = value
+
+
+def _claim_or_is_current_tutor_attempt(avatar_session_id, attempt_id):
+    value = str(attempt_id)
+    if _tutor_attempt_redis is not None:
+        key = _tutor_attempt_key(avatar_session_id)
+        if _tutor_attempt_redis.set(key, value, nx=True, ex=TUTOR_ATTEMPT_TTL_SECONDS):
+            return True
+        return _tutor_attempt_redis.get(key) == value
+    with _tutor_attempt_lock:
+        current = _tutor_attempts.setdefault(avatar_session_id, value)
+        return current == value
+
+
+def _is_current_tutor_attempt(avatar_session_id, attempt_id):
+    value = str(attempt_id)
+    if _tutor_attempt_redis is not None:
+        return _tutor_attempt_redis.get(_tutor_attempt_key(avatar_session_id)) == value
+    with _tutor_attempt_lock:
+        return _tutor_attempts.get(avatar_session_id) == value
 
 
 @app.route("/api/lessons/<lesson_id>/avatar/speak", methods=["POST"])
@@ -1954,6 +2197,16 @@ def avatar_speak(lesson_id):
     avatar_session_id = _avatar_session_id_from_body(body)
     if avatar_session_id is None:
         return jsonify({"error": "Invalid avatar session ID"}), 400
+    attempt_id = _avatar_attempt_id_from_body(body)
+    if attempt_id is None:
+        return jsonify({"error": "Invalid tutor attempt ID"}), 400
+
+    try:
+        if not _claim_or_is_current_tutor_attempt(avatar_session_id, attempt_id):
+            return jsonify({"error": "Tutor response was superseded", "superseded": True}), 409
+    except RedisError as e:
+        app.logger.error(f"Tutor attempt store unavailable: {e}")
+        return jsonify({"error": "Tutor coordination service unavailable"}), 503
 
     text = body.get("text")
     if not isinstance(text, str) or not text.strip():
@@ -1970,15 +2223,32 @@ def avatar_speak(lesson_id):
         return jsonify({"error": "interrupt must be a boolean"}), 400
 
     try:
-        _post_livetalking_command(
-            "/human",
-            {
-                "sessionid": avatar_session_id,
-                "type": "echo",
-                "text": speech_text,
-                "interrupt": interrupt,
-            },
+        if interrupt:
+            with _tutor_attempt_guard(avatar_session_id):
+                if not _is_current_tutor_attempt(avatar_session_id, attempt_id):
+                    raise TutorSpeechSuperseded()
+                _post_livetalking_command("/interrupt_talk", {"sessionid": avatar_session_id})
+        wav_bytes = _synthesize_tts_wav(
+            speech_text,
+            model_name=TUTOR_TTS_MODEL,
+            version=TUTOR_TTS_VERSION,
+            should_continue=lambda: _is_current_tutor_attempt(avatar_session_id, attempt_id),
         )
+        with _tutor_attempt_guard(avatar_session_id):
+            if not _is_current_tutor_attempt(avatar_session_id, attempt_id):
+                raise TutorSpeechSuperseded()
+            _post_livetalking_audio(avatar_session_id, wav_bytes)
+    except TutorSpeechSuperseded:
+        return jsonify({"error": "Tutor response was superseded", "superseded": True}), 409
+    except RedisError as e:
+        app.logger.error(f"Tutor attempt store unavailable: {e}")
+        return jsonify({"error": "Tutor coordination service unavailable"}), 503
+    except TTSServiceError as e:
+        app.logger.error(f"Tutor TTS failed: {e}")
+        body = {"error": str(e)}
+        if e.upstream is not None:
+            body["upstream"] = e.upstream
+        return jsonify(body), 502
     except requests.RequestException as e:
         app.logger.error(f"LiveTalking speech proxy failed: {type(e).__name__}: {e}")
         return jsonify({"error": "LiveTalking speech service unavailable"}), 502
@@ -2002,9 +2272,17 @@ def avatar_interrupt(lesson_id):
     avatar_session_id = _avatar_session_id_from_body(body)
     if avatar_session_id is None:
         return jsonify({"error": "Invalid avatar session ID"}), 400
+    attempt_id = _avatar_attempt_id_from_body(body)
+    if attempt_id is None:
+        return jsonify({"error": "Invalid tutor attempt ID"}), 400
 
     try:
-        _post_livetalking_command("/interrupt_talk", {"sessionid": avatar_session_id})
+        with _tutor_attempt_guard(avatar_session_id):
+            _set_current_tutor_attempt(avatar_session_id, attempt_id)
+            _post_livetalking_command("/interrupt_talk", {"sessionid": avatar_session_id})
+    except RedisError as e:
+        app.logger.error(f"Tutor attempt store unavailable: {e}")
+        return jsonify({"error": "Tutor coordination service unavailable"}), 503
     except requests.RequestException as e:
         app.logger.error(f"LiveTalking interrupt proxy failed: {type(e).__name__}: {e}")
         return jsonify({"error": "LiveTalking interrupt service unavailable"}), 502

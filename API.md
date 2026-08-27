@@ -67,6 +67,7 @@ Limits are keyed to your identity (user, then session, then IP), not shared acro
 | `POST /api/lessons/<id>/info/definition` | 60/hour |
 | `POST /api/lessons/<id>/info/equation` | 60/hour |
 | `POST /api/tts` | 120/hour |
+| `POST /api/lessons/<id>/avatar/speak` | 120/hour |
 | `GET /api/lessons/<id>/status` | none (exempt — safe to poll frequently) |
 
 A `429` response returns `{"error": "Too many requests. Please slow down and try again shortly."}`.
@@ -333,7 +334,11 @@ Converts narration text to audio. Not lesson-scoped or cached — each call synt
 
 **Body:** `{ "text": "..." }`
 **Response:** `200` — raw `audio/wav` bytes (not JSON — read as a blob)
-**Error:** `400` — empty text; `500` — upstream TTS service error
+**Error:** `400` — empty text; `502` — upstream TTS service error
+
+Tutor avatar speech uses the same backend TTS service server-side, then forwards the generated WAV to LiveTalking over `/humanaudio`; the browser should listen to the WebRTC stream rather than playing a separate WAV.
+
+Tutor `/avatar/interrupt` and `/avatar/speak` requests include the current positive integer `attempt_id`. Starting a newer attempt invalidates older speech work across backend workers; superseded `/avatar/speak` requests return `409` and never upload stale audio.
 
 ---
 
