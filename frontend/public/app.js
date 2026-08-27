@@ -2375,7 +2375,7 @@ function toggleSidebar() {
 
 // ─── Tutor session (LiveTalking WebRTC stream) ────────────────────────────────
 const TUTOR_SPEAKING_POLL_INTERVAL_MS = 500;
-const TUTOR_SPEAKING_START_TIMEOUT_MS = 10000;
+const TUTOR_SPEAKING_START_TIMEOUT_MS = 30000;
 const TUTOR_SPEAKING_IDLE_CONFIRMATIONS = 2;
 
 const TutorSession = {
@@ -2940,6 +2940,7 @@ function setTutorWidgetVisible(visible) {
     ensureTutorSessionConnected().catch(() => {});
     return;
   }
+  setTutorRecordingShell(false, { focusInput: false });
   stopTutorActivity();
   panel.classList.add("hidden");
   videoEl.muted = true;
@@ -3046,6 +3047,7 @@ function toggleTutorChat() {
   const videoEl = document.getElementById("tutor-chat-avatar-video");
   const wasHidden = panel.classList.contains("hidden");
   if (!wasHidden) {
+    setTutorRecordingShell(false, { focusInput: false });
     stopTutorActivity();
     panel.classList.add("hidden");
     videoEl.muted = true;
@@ -3060,7 +3062,35 @@ function toggleTutorChat() {
   ensureTutorSessionConnected().catch(() => {});
 }
 
+let tutorRecordingShellActive = false;
+
+function setTutorRecordingShell(active, { focusInput = true } = {}) {
+  tutorRecordingShellActive = active;
+  const shell = document.getElementById("tutor-chat-input-shell");
+  const input = document.getElementById("tutor-chat-input");
+  const micButton = document.getElementById("tutor-chat-mic");
+  const recordingStatus = document.getElementById("tutor-chat-recording-status");
+  const sendButton = document.getElementById("tutor-chat-send");
+
+  shell.classList.toggle("is-recording", active);
+  input.readOnly = active;
+  micButton.setAttribute("aria-pressed", String(active));
+  micButton.setAttribute("aria-label", active ? "Discard voice input" : "Start voice input");
+  micButton.title = active ? "Discard voice input" : "Start voice input";
+  recordingStatus.setAttribute("aria-hidden", String(!active));
+  sendButton.disabled = active;
+
+  if (!active && focusInput) input.focus();
+}
+
+function toggleTutorRecordingShell() {
+  setTutorRecordingShell(!tutorRecordingShellActive, {
+    focusInput: tutorRecordingShellActive,
+  });
+}
+
 async function sendTutorChatMessage() {
+  if (tutorRecordingShellActive) return;
   const input = document.getElementById("tutor-chat-input");
   const text = input.value.trim();
   if (!text) return;
@@ -3120,6 +3150,7 @@ async function sendTutorChatMessage() {
 document.getElementById("tutor-chat-toggle").addEventListener("click", toggleTutorChat);
 document.getElementById("tutor-chat-close").addEventListener("click", toggleTutorChat);
 document.getElementById("tutor-chat-send").addEventListener("click", sendTutorChatMessage);
+document.getElementById("tutor-chat-mic").addEventListener("click", toggleTutorRecordingShell);
 document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendTutorChatMessage();
 });
