@@ -54,6 +54,7 @@ Set these in `backend/.env`:
 | `FLASK_SECRET_KEY` | Signs session cookies — keep this stable across restarts, or existing users get logged out |
 | `LLM_BASE_URL` | Base URL for the LLM API (supports OpenAI-compatible endpoints) |
 | `TTS_BASE_URL` | Base URL for the text-to-speech service backing `/api/tts` |
+| `STT_WEBSOCKET_URL` | Full `ws://` or `wss://` URL for the browser-facing streaming speech-to-text service |
 | `TTS_MODEL` | Narration TTS model. Defaults to `indextts1.5` |
 | `TTS_VERSION` | Narration TTS model version/voice. Defaults to `kneo350` |
 | `TUTOR_TTS_MODEL` | Tutor avatar TTS model. Defaults to `TTS_MODEL` |
@@ -63,6 +64,12 @@ Set these in `backend/.env`:
 | `FLASK_ENV` | `development` or `production`. Compose defaults to `development` unless overridden — set `FLASK_ENV=production` in your shell or `.env` before `up` for a production-style run |
 
 `MANIM_MCP_URL` and `MANIM_DOWNLOAD_URL` are already wired up in `docker-compose.yml` to point at the `manim-agent` service by its container name — no need to set these yourself under normal Compose usage.
+
+For a local WhisperLiveKit instance published on port `8002`, use its Deepgram-compatible streaming endpoint:
+
+```env
+STT_WEBSOCKET_URL=ws://127.0.0.1:8002/v1/listen?language=en&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=1000&vad_events=true
+```
 
 ## Data persistence
 

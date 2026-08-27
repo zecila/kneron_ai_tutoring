@@ -3230,52 +3230,49 @@ html, body {
 }
 
 #tutor-chat-input-shell.is-recording #tutor-chat-input {
-  opacity: 0;
+  padding-right: 56px;
   pointer-events: none;
 }
 
 #tutor-chat-recording-status {
   position: absolute;
-  inset: 0 42px 0 10px;
-  display: none;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  color: #b91c1c;
-  font-size: var(--font-size);
-  pointer-events: none;
-}
-
-#tutor-chat-input-shell.is-recording #tutor-chat-recording-status {
-  display: flex;
-}
-
-.tutor-recording-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 8px;
-  border-radius: 50%;
-  background: #dc2626;
-  animation: tutor-recording-pulse 1.15s ease-in-out infinite;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .tutor-recording-level {
-  display: block;
-  flex: 0 1 96px;
-  width: 96px;
-  height: 6px;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  display: none;
+  width: 5px;
+  height: 20px;
   overflow: hidden;
-  border-radius: 3px;
+  border-radius: 2px;
   background: rgb(220 38 38 / 18%);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+#tutor-chat-input-shell.is-recording .tutor-recording-level {
+  display: block;
 }
 
 .tutor-recording-level-fill {
-  display: block;
-  width: var(--tutor-mic-level, 4%);
-  height: 100%;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--tutor-mic-level, 4%);
   border-radius: inherit;
-  background: currentColor;
-  transition: width 80ms linear;
+  background: #dc2626;
+  transition: height 80ms linear;
 }
 
 #tutor-chat-input-shell.is-requesting .tutor-recording-level {
@@ -3317,6 +3314,7 @@ html, body {
 .tutor-cancel-recording-icon { display: none; }
 
 #tutor-chat-input-shell.is-recording #tutor-chat-mic {
+  right: 16px;
   color: #b91c1c;
 }
 
@@ -3337,16 +3335,7 @@ html, body {
   opacity: 0.45;
 }
 
-@keyframes tutor-recording-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.75); }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .tutor-recording-dot {
-    animation: none;
-  }
-
   .tutor-recording-level-fill { transition: none; }
 }
 

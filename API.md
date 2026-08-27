@@ -34,6 +34,8 @@ Base URL: `http://localhost:5000`
   - [POST /api/lessons/\<lesson_id\>/info/equation](#post-apilessonslesson_idinfoequation)
 - [Text-to-speech](#text-to-speech)
   - [POST /api/tts](#post-apitts)
+- [Speech-to-text configuration](#speech-to-text-configuration)
+  - [GET /api/stt/config](#get-apisttconfig)
 - [Error shape](#error-shape)
 
 ---
@@ -339,6 +341,23 @@ Converts narration text to audio. Not lesson-scoped or cached — each call synt
 Tutor avatar speech uses the same backend TTS service server-side, then forwards the generated WAV to LiveTalking over `/humanaudio`; the browser should listen to the WebRTC stream rather than playing a separate WAV.
 
 Tutor `/avatar/interrupt` and `/avatar/speak` requests include the current positive integer `attempt_id`. Starting a newer attempt invalidates older speech work across backend workers; superseded `/avatar/speak` requests return `409` and never upload stale audio.
+
+---
+
+## Speech-to-text configuration
+
+### `GET /api/stt/config`
+Returns the browser-facing streaming STT WebSocket URL configured through `STT_WEBSOCKET_URL`.
+
+**Response:** `200` — `{ "websocket_url": "ws://stt.example/audio/stt" }`
+
+**Error:** `503` — STT is missing or is not a valid `ws://` or `wss://` URL.
+
+The browser connects directly to this URL. This endpoint does not initialize an STT model or proxy audio.
+
+The tutor microphone currently expects a Deepgram-compatible streaming endpoint, such as WhisperLiveKit's
+`/v1/listen`, configured for 16 kHz mono `linear16` audio with interim results enabled. During recording,
+the browser displays interim and finalized transcript text but does not submit it as a chat message.
 
 ---
 

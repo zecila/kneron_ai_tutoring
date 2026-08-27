@@ -14,6 +14,7 @@ import wave
 from contextlib import contextmanager
 from queue import Empty, Queue
 from datetime import timedelta, datetime, timezone
+from urllib.parse import urlsplit
 from flask import Flask, jsonify, send_from_directory, request, Response, session
 from openai import OpenAI, APIConnectionError, RateLimitError, InternalServerError
 from werkzeug.utils import secure_filename
@@ -1007,6 +1008,44 @@ def handle_error(e):
     raise e
 
     
+# ── Speech services ─────────────────────────────────────────────────────────────
+STT_WEBSOCKET_URL = os.environ.get("STT_WEBSOCKET_URL", "").strip()
+
+
+def _validated_stt_websocket_url(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("STT websocket URL is not configured")
+
+    websocket_url = value.strip()
+    parsed = urlsplit(websocket_url)
+    if (
+        parsed.scheme not in {"ws", "wss"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("STT websocket URL is invalid")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("STT websocket URL is invalid") from exc
+    return websocket_url
+
+
+@app.route("/api/stt/config", methods=["GET"])
+def stt_config():
+    try:
+        websocket_url = _validated_stt_websocket_url(STT_WEBSOCKET_URL)
+    except ValueError as exc:
+        app.logger.error("STT configuration unavailable: %s", exc)
+        return jsonify({"error": str(exc)}), 503
+
+    response = jsonify({"websocket_url": websocket_url})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ── Text to Speech ───────────────────────────────────────────────────────────────
 TTS_BASE = os.environ["TTS_BASE_URL"].rstrip("/")
 TTS_MODEL = os.environ.get("TTS_MODEL", "indextts1.5")

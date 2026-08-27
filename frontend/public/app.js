@@ -2924,6 +2924,57 @@ function ensureTutorSessionConnected() {
     });
 }
 
+const TutorSTTConfig = {
+  websocketUrl: null,
+  loadingPromise: null,
+  error: null,
+};
+
+function validateTutorSTTWebSocketUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("The speech service URL is invalid.");
+  }
+  if (
+    !["ws:", "wss:"].includes(parsed.protocol)
+    || !parsed.hostname
+    || parsed.username
+    || parsed.password
+    || parsed.hash
+  ) {
+    throw new Error("The speech service URL is invalid.");
+  }
+  return parsed.href;
+}
+
+function loadTutorSTTConfig() {
+  if (TutorSTTConfig.websocketUrl) return Promise.resolve(TutorSTTConfig.websocketUrl);
+  if (TutorSTTConfig.loadingPromise) return TutorSTTConfig.loadingPromise;
+
+  TutorSTTConfig.loadingPromise = fetch("/api/stt/config", {
+    headers: { "Accept": "application/json" },
+    cache: "no-store",
+  })
+    .then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Speech input is not configured.");
+      const websocketUrl = validateTutorSTTWebSocketUrl(data.websocket_url);
+      TutorSTTConfig.websocketUrl = websocketUrl;
+      TutorSTTConfig.error = null;
+      return websocketUrl;
+    })
+    .catch((err) => {
+      TutorSTTConfig.error = err;
+      throw err;
+    })
+    .finally(() => {
+      TutorSTTConfig.loadingPromise = null;
+    });
+  return TutorSTTConfig.loadingPromise;
+}
+
 function stopTutorActivity() {
   TutorSession.cancelActiveMessage();
   const interruptRequest = TutorSession.interruptSpeech(TutorSession.messageAttempt).catch((err) => {
@@ -2939,6 +2990,9 @@ function setTutorWidgetVisible(visible) {
   const videoEl = document.getElementById("tutor-chat-avatar-video");
   widget.classList.toggle("hidden", !visible);
   if (visible) {
+    loadTutorSTTConfig().catch((err) => {
+      console.debug("[TutorSTT] configuration unavailable:", err);
+    });
     TutorSession._syncAudioMute();
     ensureTutorSessionConnected().catch(() => {});
     return;
@@ -3073,10 +3127,15 @@ let tutorMicrophoneContext = null;
 let tutorMicrophoneSource = null;
 let tutorMicrophoneAnalyser = null;
 let tutorMicrophoneLevelFrame = null;
+let tutorSTTSession = null;
 let tutorAvatarVisualInterruptId = 0;
 let tutorAvatarVisualInterruptTimer = null;
 
+const TUTOR_STT_WORKLET_URL = "/tutor-stt-worklet.js";
+const TUTOR_STT_MAX_BUFFERED_BYTES = 1024 * 1024;
+
 function setTutorRecordingShell(active, { focusInput = true, state = "recording" } = {}) {
+  const wasActive = tutorRecordingShellActive;
   tutorRecordingShellActive = active;
   const shell = document.getElementById("tutor-chat-input-shell");
   const input = document.getElementById("tutor-chat-input");
@@ -3087,7 +3146,12 @@ function setTutorRecordingShell(active, { focusInput = true, state = "recording"
 
   shell.classList.toggle("is-recording", active);
   shell.classList.toggle("is-requesting", active && state === "requesting");
+  if (active && !wasActive) input.value = "";
+  if (!active && wasActive) input.value = "";
   input.readOnly = active;
+  input.placeholder = active
+    ? (state === "requesting" ? "Starting microphone..." : "Listening...")
+    : "Ask a question...";
   micButton.setAttribute("aria-pressed", String(active));
   micButton.setAttribute("aria-label", active ? "Discard voice input" : "Start voice input");
   micButton.title = active ? "Discard voice input" : "Start voice input";
@@ -3157,6 +3221,137 @@ function updateTutorMicrophoneLevel() {
   drawLevel();
 }
 
+function joinTutorTranscript(left, right) {
+  return [left, right]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function updateTutorSTTTranscript(session) {
+  if (tutorSTTSession !== session || !tutorRecordingShellActive) return;
+  const input = document.getElementById("tutor-chat-input");
+  const label = document.getElementById("tutor-chat-recording-label");
+  const transcript = joinTutorTranscript(session.finalTranscript, session.interimTranscript);
+  input.value = transcript;
+  input.setSelectionRange(input.value.length, input.value.length);
+  input.scrollLeft = input.scrollWidth;
+  label.textContent = transcript ? `Transcription: ${transcript}` : "Listening...";
+}
+
+function failTutorSTTSession(session, message) {
+  if (tutorSTTSession !== session || session.stopping) return;
+  console.error("[TutorSTT] session failed:", message);
+  stopTutorMicrophone();
+  showToast(message);
+}
+
+function handleTutorSTTMessage(session, event) {
+  if (tutorSTTSession !== session || session.stopping) return;
+
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch (err) {
+    console.debug("[TutorSTT] ignored non-JSON message:", err);
+    return;
+  }
+
+  if (message.type === "Error") {
+    failTutorSTTSession(
+      session,
+      message.description || message.message || "The speech service reported an error."
+    );
+    return;
+  }
+  if (message.type !== "Results") return;
+
+  const transcript = message.channel?.alternatives?.[0]?.transcript?.trim() || "";
+  if (message.is_final) {
+    session.finalTranscript = joinTutorTranscript(session.finalTranscript, transcript);
+    session.interimTranscript = "";
+  } else {
+    session.interimTranscript = transcript;
+  }
+  updateTutorSTTTranscript(session);
+}
+
+function openTutorSTTSession(websocketUrl, attemptId) {
+  const socket = new WebSocket(websocketUrl);
+  const session = {
+    attemptId,
+    socket,
+    workletNode: null,
+    silentGain: null,
+    finalTranscript: "",
+    interimTranscript: "",
+    opened: false,
+    stopping: false,
+  };
+  tutorSTTSession = session;
+
+  socket.addEventListener("message", (event) => handleTutorSTTMessage(session, event));
+  socket.addEventListener("close", () => {
+    if (tutorSTTSession !== session || session.stopping) return;
+    failTutorSTTSession(session, "The speech service disconnected. Please try again.");
+  });
+
+  const opened = new Promise((resolve, reject) => {
+    socket.addEventListener("open", () => {
+      session.opened = true;
+      resolve();
+    }, { once: true });
+    socket.addEventListener("error", () => {
+      if (!session.opened) reject(new Error("Could not connect to the speech service."));
+    }, { once: true });
+    socket.addEventListener("close", () => {
+      if (!session.opened) reject(new Error("The speech service closed the connection."));
+    }, { once: true });
+  });
+
+  return { session, opened };
+}
+
+async function attachTutorSTTAudio(session) {
+  if (!tutorMicrophoneContext?.audioWorklet) {
+    throw new Error("AudioWorklet is not supported in this browser.");
+  }
+  await tutorMicrophoneContext.audioWorklet.addModule(TUTOR_STT_WORKLET_URL);
+  if (tutorSTTSession !== session || session.stopping) return;
+
+  const workletNode = new AudioWorkletNode(
+    tutorMicrophoneContext,
+    "tutor-stt-pcm-capture",
+    {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      processorOptions: { outputSampleRate: 16000 },
+    }
+  );
+  const silentGain = tutorMicrophoneContext.createGain();
+  silentGain.gain.value = 0;
+  workletNode.port.onmessage = (event) => {
+    if (
+      tutorSTTSession !== session
+      || session.stopping
+      || event.data?.type !== "audio"
+      || session.socket.readyState !== WebSocket.OPEN
+    ) return;
+    if (session.socket.bufferedAmount > TUTOR_STT_MAX_BUFFERED_BYTES) {
+      failTutorSTTSession(session, "The speech service cannot keep up with the microphone stream.");
+      return;
+    }
+    session.socket.send(event.data.buffer);
+  };
+
+  tutorMicrophoneSource.connect(workletNode);
+  workletNode.connect(silentGain);
+  silentGain.connect(tutorMicrophoneContext.destination);
+  session.workletNode = workletNode;
+  session.silentGain = silentGain;
+}
+
 function resumeTutorAvatarAfterInterrupt({ play = true } = {}) {
   tutorAvatarVisualInterruptId++;
   if (tutorAvatarVisualInterruptTimer !== null) {
@@ -3221,10 +3416,20 @@ function releaseTutorMicrophoneResources() {
   const analyser = tutorMicrophoneAnalyser;
   const stream = tutorMicrophoneStream;
   const context = tutorMicrophoneContext;
+  const sttSession = tutorSTTSession;
   tutorMicrophoneStream = null;
   tutorMicrophoneContext = null;
   tutorMicrophoneSource = null;
   tutorMicrophoneAnalyser = null;
+  tutorSTTSession = null;
+
+  if (sttSession) {
+    sttSession.stopping = true;
+    sttSession.workletNode?.port.close();
+    try { sttSession.workletNode?.disconnect(); } catch {}
+    try { sttSession.silentGain?.disconnect(); } catch {}
+    try { sttSession.socket.close(1000, "Voice input stopped"); } catch {}
+  }
 
   try { source?.disconnect(); } catch {}
   try { analyser?.disconnect(); } catch {}
@@ -3233,6 +3438,8 @@ function releaseTutorMicrophoneResources() {
   });
   context?.close().catch(() => {});
   document.querySelector(".tutor-recording-level")?.style.removeProperty("--tutor-mic-level");
+  const recordingLabel = document.getElementById("tutor-chat-recording-label");
+  recordingLabel.textContent = "Listening...";
 }
 
 function stopTutorMicrophone({ focusInput = true } = {}) {
@@ -3256,6 +3463,16 @@ async function startTutorMicrophone() {
   const attemptId = ++tutorMicrophoneAttemptId;
   stopTutorAudioForMicrophone();
   setTutorRecordingShell(true, { focusInput: false, state: "requesting" });
+
+  try {
+    await loadTutorSTTConfig();
+  } catch (err) {
+    if (attemptId !== tutorMicrophoneAttemptId) return;
+    stopTutorMicrophone();
+    showToast(`Speech input is unavailable. ${err.message}`);
+    return;
+  }
+  if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) return;
 
   if (!navigator.mediaDevices?.getUserMedia) {
     stopTutorMicrophone();
@@ -3296,6 +3513,14 @@ async function startTutorMicrophone() {
 
     if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) return;
 
+    const { session, opened } = openTutorSTTSession(TutorSTTConfig.websocketUrl, attemptId);
+    await Promise.all([opened, attachTutorSTTAudio(session)]);
+    if (
+      attemptId !== tutorMicrophoneAttemptId
+      || !tutorRecordingShellActive
+      || tutorSTTSession !== session
+    ) return;
+
     stream.getAudioTracks().forEach((track) => {
       track.addEventListener("ended", () => {
         if (tutorMicrophoneStream !== stream) return;
@@ -3304,12 +3529,16 @@ async function startTutorMicrophone() {
       }, { once: true });
     });
     setTutorRecordingShell(true, { focusInput: false, state: "recording" });
+    updateTutorSTTTranscript(session);
     updateTutorMicrophoneLevel();
   } catch (err) {
     if (attemptId !== tutorMicrophoneAttemptId) return;
     console.error("[TutorMicrophone] start failed:", err);
     stopTutorMicrophone();
-    showToast(microphoneErrorMessage(err));
+    const message = err?.message?.includes("speech service") || err?.message?.includes("AudioWorklet")
+      ? err.message
+      : microphoneErrorMessage(err);
+    showToast(message);
   }
 }
 

@@ -394,11 +394,7 @@
         <div id="tutor-chat-input-shell">
           <input type="text" id="tutor-chat-input" placeholder="Ask a question..." autocomplete="off" maxlength="2000">
           <div id="tutor-chat-recording-status" aria-live="polite" aria-hidden="true">
-            <span class="tutor-recording-dot"></span>
             <span id="tutor-chat-recording-label">Listening...</span>
-            <span class="tutor-recording-level" aria-hidden="true">
-              <span class="tutor-recording-level-fill"></span>
-            </span>
           </div>
           <button id="tutor-chat-mic" type="button" aria-label="Start voice input" aria-pressed="false" title="Start voice input">
             <svg class="tutor-mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -411,6 +407,9 @@
               <path d="m6 6 12 12"></path>
             </svg>
           </button>
+          <span class="tutor-recording-level" aria-hidden="true">
+            <span class="tutor-recording-level-fill"></span>
+          </span>
         </div>
         <button id="tutor-chat-send" aria-label="Send message">&#8594;</button>
       </div>
