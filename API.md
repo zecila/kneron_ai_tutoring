@@ -1,374 +1,824 @@
 # Kneron Tutoring Project API Reference
 
-Base URL: `http://localhost:5000` 
+Base URL: `http://localhost:5000`
 
-## Table of contents
+This document describes the active routes in `backend/server.py`. The browser application uses cookie-based sessions; there is no bearer-token API.
 
-- [Authentication & sessions](#authentication--sessions)
-- [Rate limits](#rate-limits)
-- [Auth](#auth)
-  - [POST /api/auth/signup](#post-apiauthsignup)
-  - [POST /api/auth/login](#post-apiauthlogin)
-  - [POST /api/auth/logout](#post-apiauthlogout)
-  - [POST /api/auth/change-password](#post-apiauthchange-password)
-  - [GET /api/auth/me](#get-apiauthme)
-  - [POST /api/auth/delete-account](#post-apiauthdelete-account)
-- [Lessons](#lessons)
-  - [POST /api/lessons](#post-apilessons)
-  - [GET /api/lessons/\<lesson_id\>/status](#get-apilessonslesson_idstatus)
-  - [POST /api/lessons/\<lesson_id\>/retry](#post-apilessonslesson_idretry)
-  - [GET /api/lessons](#get-apilessons)
-  - [DELETE /api/lessons/\<lesson_id\>](#delete-apilessonslesson_id)
-  - [GET /api/lessons/\<lesson_id\>/curriculum](#get-apilessonslesson_idcurriculum)
-  - [GET /api/lessons/\<lesson_id\>/media/\<filename\>](#get-apilessonslesson_idmediafilename)
-- [Progress](#progress)
-  - [GET /api/lessons/\<lesson_id\>/progress](#get-apilessonslesson_idprogress)
-  - [POST /api/lessons/\<lesson_id\>/progress](#post-apilessonslesson_idprogress)
-  - [GET /api/progress](#get-apiprogress)
-- [Quizzes](#quizzes)
-  - [POST /api/lessons/\<lesson_id\>/quiz-attempt](#post-apilessonslesson_idquiz-attempt)
-  - [POST /api/lessons/\<lesson_id\>/quiz-attempt-batch](#post-apilessonslesson_idquiz-attempt-batch)
-  - [GET /api/lessons/\<lesson_id\>/quiz-history](#get-apilessonslesson_idquiz-history)
-- [Info cards (definitions & equations)](#info-cards-definitions--equations)
-  - [POST /api/lessons/\<lesson_id\>/info/definition](#post-apilessonslesson_idinfodefinition)
-  - [POST /api/lessons/\<lesson_id\>/info/equation](#post-apilessonslesson_idinfoequation)
-- [Text-to-speech](#text-to-speech)
-  - [POST /api/tts](#post-apitts)
-- [Speech-to-text configuration](#speech-to-text-configuration)
-  - [GET /api/stt/config](#get-apisttconfig)
-- [Error shape](#error-shape)
+## Conventions
 
----
+### Sessions And Identity
 
-## Authentication & sessions
+Flask issues a signed, 365-day session cookie on first contact. Include that cookie on every request (`credentials: "include"` in `fetch`, or a cookie jar in another client).
 
-Every request carries a signed session cookie (`Flask` session), issued automatically on first contact — you don't need to request one explicitly. This cookie identifies you as either:
+- **Anonymous visitors** receive a random `session_id`. They can create personal lessons and retain progress, quiz history, and saved items in that browser session.
+- **Signed-in users** have a `user_id` attached to the same session. Signup and login claim data created by the current anonymous session.
+- **Roles** are `student` and `teacher`. The UI presents different workflows for each role.
 
-- **Anonymous** — a random `session_id` assigned on first visit. Anonymous usage is fully functional; lessons and quiz history are tied to this session.
-- **Signed in** — a `user_id` attached to the session after `/api/auth/login` or `/api/auth/signup`. Signing up or logging in automatically **claims** all data created under the current anonymous session, carrying it over to the account.
+Class routes require a signed-in account. The UI reserves class ownership and assignment management for teachers and class joining for students. At the API layer, mutation routes enforce login, class ownership, or enrollment as documented; they do not all independently re-check the account role.
 
-All endpoints below other than `/api/auth/signup` and `/api/auth/login` rely on this cookie for identity — there is no separate API key or bearer token.
+### Lesson Access
 
-**Include cookies on every request** (`credentials: "include"` in `fetch`, or a cookie jar in your HTTP client), or session-based auth will silently fail.
+A lesson-scoped route grants access when the caller is either:
 
-### Ownership and 404s
+- the anonymous session or signed-in user that owns the lesson; or
+- a signed-in student enrolled in the class for a currently `published` assignment.
 
-Any endpoint scoped to a specific `lesson_id` checks that the calling session/account owns that lesson. If it doesn't — including if the lesson simply doesn't exist — the response is **404 "Lesson not found"**, not 403. This is deliberate: it avoids confirming to a caller that a given lesson ID exists at all.
+Most inaccessible resources return `404` rather than `403` so the API does not reveal whether another user's resource exists. Owner-only operations, such as retrying or deleting a lesson, do not grant access to assigned students.
 
----
+### Data Formats
 
-## Rate limits
+- Request and response bodies are JSON unless the route specifies `multipart/form-data`, `audio/wav`, or an upstream WebRTC response.
+- Timestamps are UTC ISO 8601 strings. Assignment `due_at` values are nullable ISO 8601 date-times supplied by the client.
+- Boolean values stored in SQLite may appear as `0`/`1` in database-backed response objects.
+- Successful routes return `200` unless another status is listed.
 
-Limits are keyed to your identity (user, then session, then IP), not shared across users. A default of **200 requests/hour** applies to any route without a more specific limit listed below.
+### Errors
+
+API errors use this shape:
+
+```json
+{ "error": "Human-readable message" }
+```
+
+Some tutor errors add fields such as `superseded` or `upstream`. Unhandled `/api/*` exceptions return `500` with a generic message instead of a stack trace.
+
+## Rate Limits
+
+The default limit is **200 requests per hour**. It is keyed by signed-in user, then anonymous session, then IP address. Auth routes marked as IP-based use the client IP directly. Redis stores shared counters under Docker Compose; running without `REDIS_URL` falls back to process-local memory.
 
 | Route | Limit |
-|---|---|
-| `POST /api/auth/signup` | 5/hour |
-| `POST /api/auth/login` | 10/hour |
+|---|---:|
+| `POST /api/auth/signup` | 5/hour, IP-based |
+| `POST /api/auth/login` | 50/hour, IP-based |
+| `POST /api/auth/forgot-password` | 100/hour, IP-based |
 | `POST /api/lessons` | 10/hour |
-| `POST /api/lessons/<id>/info/definition` | 60/hour |
-| `POST /api/lessons/<id>/info/equation` | 60/hour |
+| `POST /api/classes/<class_id>/assignments` | 10/hour |
+| `POST /api/classes/<class_id>/assignments/<assignment_id>/regenerate` | 10/hour |
+| `POST /api/lessons/<lesson_id>/info/definition` | 60/hour |
+| `POST /api/lessons/<lesson_id>/info/equation` | 60/hour |
 | `POST /api/tts` | 120/hour |
-| `POST /api/lessons/<id>/avatar/speak` | 120/hour |
-| `GET /api/lessons/<id>/status` | none (exempt — safe to poll frequently) |
+| `GET /api/lessons/<lesson_id>/status` | Exempt |
+| `POST /api/lessons/<lesson_id>/avatar/webrtc/offer` | 60/hour |
+| `POST /api/lessons/<lesson_id>/tutor/message` | 120/hour |
+| `POST /api/lessons/<lesson_id>/avatar/speak` | 120/hour |
+| `POST /api/lessons/<lesson_id>/avatar/interrupt` | 240/hour |
+| `POST /api/lessons/<lesson_id>/avatar/speaking` | 1,200/hour |
+| `POST /api/lessons/<lesson_id>/avatar/disconnect` | 240/hour |
 
-A `429` response returns `{"error": "Too many requests. Please slow down and try again shortly."}`.
+A limit violation returns `429`:
 
----
+```json
+{ "error": "Too many requests. Please slow down and try again shortly." }
+```
 
-## Auth
+## Authentication And Accounts
 
 ### `POST /api/auth/signup`
-Create an account. Automatically claims the current anonymous session's data.
 
-**Body**
-```json
-{ "email": "you@example.com", "password": "at least 6 chars" }
-```
+Creates an account and claims data belonging to the current anonymous session.
 
-**Responses**
-- `201` — `{ "ok": true, "email": "you@example.com" }`
-- `400` — missing fields, invalid email, or password under 6 characters
-- `409` — an account with that email already exists
-
----
-
-### `POST /api/auth/login`
-**Body:** `{ "email": "...", "password": "..." }`
-
-**Responses**
-- `200` — `{ "ok": true, "email": "..." }`
-- `401` — `{ "error": "Invalid credentials" }`
-
----
-
-### `POST /api/auth/logout`
-No body. Clears `user_id` from the session (the session itself, and any anonymous data under it, persists).
-
-**Response:** `200` — `{ "ok": true }`
-
----
-
-### `POST /api/auth/change-password`
-Requires an active login session.
-
-**Body**
-```json
-{ "current_password": "...", "new_password": "at least 6 chars" }
-```
-
-**Responses**
-- `200` — `{ "ok": true }`
-- `400` — new password too short, or current password incorrect
-- `401` — not logged in
-
----
-
-### `GET /api/auth/me`
-Returns the current identity. Safe to call anonymously.
-
-**Responses**
-- `200` (logged in) — `{ "logged_in": true, "email": "...", "member_since": "2026-01-01T00:00:00Z" }`
-- `200` (anonymous) — `{ "logged_in": false }`
-
----
-
-### `POST /api/auth/delete-account`
-Permanently deletes the account: all owned lesson folders on disk, all DB rows (quiz history, progress, lesson ownership), and the user row itself. Also clears the session, so the browser gets a fresh anonymous identity afterward.
-
-**Responses**
-- `200` — `{ "ok": true }`
-- `401` — not logged in
-
----
-
-## Lessons
-
-### `POST /api/lessons`
-Upload a document and kick off lesson generation. Returns immediately — generation happens in the background; poll `/status` to track progress.
-
-**Body:** `multipart/form-data` with a `file` field.
-Accepted types: `.pdf`, `.docx`, `.pptx`. Max size: 50MB. Max 10 lessons per owner.
-
-**Responses**
-- `202` — `{ "lesson_id": "20260713-142200-a1b2c3" }`
-- `400` — no file provided, unsupported extension, or lesson limit (10) reached
-- `413` — file over 50MB
-
----
-
-### `GET /api/lessons/<lesson_id>/status`
-Poll while a lesson is generating. Not rate-limited — safe to call every couple seconds.
-
-**Response `200`**
 ```json
 {
-  "lesson_id": "20260713-142200-a1b2c3",
-  "status": "generating_slides",
-  "label": "Building your slides",
-  "progress": 0.8,
-  "source_filename": "chapter3.pdf",
-  "course": "Intro to Linear Algebra"
+  "email": "student@example.com",
+  "password": "at least 6 characters",
+  "role": "student",
+  "first_name": "Ada",
+  "last_name": "Lovelace"
 }
 ```
-`status` is one of: `queued`, `extracting`, `building_curriculum`, `generating_slides`, `ready`, `failed`. On `failed`, the payload also includes `failed_stage` and `error`.
 
-**Error:** `404` if the lesson doesn't exist or isn't owned by the caller.
+`role` defaults to `student`; the accepted values are `student` and `teacher`. Both name fields are required.
 
----
+- `201`: `{ "ok": true, "email": "student@example.com", "role": "student" }`
+- `400`: missing/invalid fields, invalid role, or a password shorter than six characters
+- `409`: account already exists
 
-### `POST /api/lessons/<lesson_id>/retry`
-Resumes a **failed** lesson from the stage it failed at, rather than restarting from scratch.
+### `POST /api/auth/login`
 
-**Responses**
-- `202` — `{ "status": "retrying" }`
-- `400` — lesson isn't currently in a failed state
-- `404` — lesson not found, or the original uploaded file is missing on disk
-
----
-
-### `GET /api/lessons`
-List lessons owned by the caller (anonymous session or logged-in account), newest first. Each entry is that lesson's current `meta.json` (same shape as the `/status` response).
-
-**Response:** `200` — `[ { "lesson_id": "...", "status": "ready", ... }, ... ]`
-
----
-
-### `DELETE /api/lessons/<lesson_id>`
-Deletes the lesson's DB rows (ownership, quiz history, progress) and removes its folder from disk.
-
-**Responses**
-- `200` — `{ "ok": true }`
-- `404` — not found / not owned
-
----
-
-### `GET /api/lessons/<lesson_id>/curriculum`
-Returns the full curriculum graph (concepts, relationships, flashcards, quiz questions) generated for the lesson.
-
-**Responses**
-- `200` — curriculum graph JSON
-- `404` — lesson not found, or curriculum stage hasn't finished yet
-
----
-
-### `GET /api/lessons/<lesson_id>/media/<filename>`
-Serves a generated media file (e.g. an animation `.mp4`) belonging to the lesson.
-
-**Responses**
-- `200` — the file, streamed
-- `400` — malformed path
-- `404` — lesson not found / not owned, or file doesn't exist
-
-*(Note: the finished slideshow itself — slides, narration text, embedded media references — is served by the equivalent `/api/lessons/<lesson_id>/slideshow` route once a lesson reaches `ready`; same auth/404 pattern as above.)*
-
----
-
-## Progress
-
-### `GET /api/lessons/<lesson_id>/progress`
-**Response `200`:** `{ "last_viewed_slide": 4, "completed": false, "updated_at": "..." }` (or `{}` if nothing recorded yet)
-
-### `POST /api/lessons/<lesson_id>/progress`
-Upserts progress. Only send the fields you're updating — omitted fields are left unchanged.
-
-**Body:** `{ "last_viewed_slide": 4, "completed": false }`
-**Response:** `200` — `{ "ok": true }`
-
-### `GET /api/progress`
-Summary for the whole Progress page: every `ready` lesson owned by the caller, each with its progress and full quiz history (concept names resolved from the curriculum file).
-
-**Response `200`**
 ```json
-[
-  {
-    "lesson": { "lesson_id": "...", "status": "ready", "course": "...", ... },
-    "progress": { "last_viewed_slide": 4, "completed": false },
-    "quiz_history": [ { "concept_id": "c003", "concept_name": "Eigenvalues", "is_correct": true, ... } ]
-  }
-]
+{ "email": "student@example.com", "password": "..." }
 ```
 
----
+- `200`: `{ "ok": true, "email": "student@example.com", "role": "student" }`
+- `401`: invalid credentials
 
-## Quizzes
+Login also claims data associated with the current anonymous session.
 
-### `POST /api/lessons/<lesson_id>/quiz-attempt`
-Submit and grade a single quiz answer.
+### `POST /api/auth/logout`
 
-**Body**
+Clears `user_id` while retaining the browser session.
+
 ```json
-{ "concept_id": "c003", "question_index": 0, "answer_given": "B" }
+{ "ok": true }
 ```
 
-**Responses**
-- `200` — `{ "correct": true, "correct_answer": "B" }`
-- `400` — invalid `question_index`, or the question is a `short_answer` type (not auto-graded)
-- `404` — lesson or `concept_id` not found
+### `GET /api/auth/me`
 
----
+Safe to call anonymously.
 
-### `POST /api/lessons/<lesson_id>/quiz-attempt-batch`
-Submit several answers for one concept at once (e.g. finishing a quiz page), recorded under a shared timestamp so the frontend can group them into one "run."
+Logged-in response:
 
-**Body**
 ```json
 {
-  "concept_id": "c003",
-  "attempts": [
-    { "question_index": 0, "answer_given": "B" },
-    { "question_index": 1, "answer_given": "True" }
+  "logged_in": true,
+  "email": "student@example.com",
+  "role": "student",
+  "first_name": "Ada",
+  "last_name": "Lovelace",
+  "member_since": "2026-08-28T18:30:00+00:00"
+}
+```
+
+Anonymous response: `{ "logged_in": false }`.
+
+### `POST /api/auth/update-name`
+
+Requires login.
+
+```json
+{ "first_name": "Ada", "last_name": "Byron" }
+```
+
+- `200`: `{ "ok": true, "first_name": "Ada", "last_name": "Byron" }`
+- `400`: either name is empty
+- `401`: not logged in
+
+### `POST /api/auth/change-password`
+
+Requires login and the current password.
+
+```json
+{ "current_password": "...", "new_password": "at least 6 characters" }
+```
+
+- `200`: `{ "ok": true }`
+- `400`: current password is wrong or the new password is too short
+- `401`: not logged in
+
+### `POST /api/auth/forgot-password`
+
+```json
+{ "email": "student@example.com" }
+```
+
+Always returns the same `200` response to avoid account enumeration:
+
+```json
+{
+  "ok": true,
+  "message": "If that email is registered, a reset link has been sent."
+}
+```
+
+The current implementation is development-only: for an existing account it prints a localhost reset link to backend logs. It does not send email. The token expires after 30 minutes.
+
+### `POST /api/auth/reset-password`
+
+```json
+{ "token": "...", "password": "at least 6 characters" }
+```
+
+- `200`: `{ "ok": true }`
+- `400`: missing/expired/used token or password too short
+
+### `POST /api/auth/delete-account`
+
+Requires login. Deletes lesson folders owned by the account, removes user-keyed lesson progress and quiz attempts, deletes the user, and clears both signed-in and anonymous session identifiers.
+
+- `200`: `{ "ok": true }`
+- `401`: not logged in
+
+## Classes
+
+### `GET /api/classes`
+
+Requires login.
+
+- A teacher receives active classes they own.
+- A student receives active classes they joined, including the teacher's first and last name.
+
+```json
+{
+  "classes": [
+    {
+      "id": 12,
+      "teacher_id": 4,
+      "name": "Algebra I",
+      "archived": 0,
+      "created_at": "2026-08-28T18:30:00+00:00"
+    }
   ]
 }
 ```
 
-**Responses**
-- `200` — `{ "ok": true }`
-- `404` — lesson or `concept_id` not found
+### `POST /api/classes`
 
----
+Requires login. The UI exposes this to teachers. An account may own at most 10 active classes.
 
-### `GET /api/lessons/<lesson_id>/quiz-history?concept_id=<optional>`
-Full attempt history for the lesson, optionally filtered to one concept, oldest first.
+```json
+{ "name": "Algebra I" }
+```
 
-**Response `200`:** `[ { "concept_id": "...", "question_index": 0, "is_correct": true, "submitted_at": "..." }, ... ]`
+- `201`: `{ "ok": true, "class_id": 12 }`
+- `400`: missing name or 10-class limit reached
+- `401`: not logged in
 
----
+### `PATCH /api/classes/<class_id>`
 
-## Info cards (definitions & equations)
+Requires ownership of the class.
 
-Both routes are **on-demand and server-side cached** — the same term/equation asked for the same lesson and context won't trigger a second LLM call.
+```json
+{ "name": "Advanced Algebra" }
+```
+
+- `200`: `{ "ok": true }`
+- `400`: empty name
+- `404`: class not owned by the caller
+
+### `POST /api/classes/<class_id>/archive`
+
+Requires ownership. Sets the class's `archived` flag; it is then omitted from normal teacher and student class lists.
+
+- `200`: `{ "ok": true }`
+- `404`: class not owned by the caller
+
+### `POST /api/classes/<class_id>/invite-code`
+
+Requires ownership. Generates a six-character uppercase alphanumeric code valid for 30 minutes. A new code invalidates every older code for that class.
+
+```json
+{
+  "ok": true,
+  "code": "A1B2C3",
+  "expires_at": "2026-08-28T19:00:00+00:00"
+}
+```
+
+### `GET /api/classes/<class_id>/invite-code`
+
+Requires ownership. Returns the latest code only if it is still valid:
+
+```json
+{ "code": "A1B2C3", "expires_at": "2026-08-28T19:00:00+00:00" }
+```
+
+When no valid code exists, both values are `null`.
+
+### `POST /api/classes/join`
+
+Requires login. The UI exposes this to students.
+
+```json
+{ "code": "A1B2C3" }
+```
+
+- `200`: `{ "ok": true, "already_joined": false }`
+- `200`: `{ "ok": true, "already_joined": true }` when enrollment already exists
+- `400`: missing, invalid, superseded, or expired code
+- `401`: not logged in
+
+### `POST /api/classes/<class_id>/leave`
+
+Requires login. Removes the caller's enrollment. The operation is idempotent.
+
+```json
+{ "ok": true }
+```
+
+### `GET /api/classes/<class_id>/roster`
+
+Requires ownership.
+
+```json
+{
+  "students": [
+    {
+      "id": 7,
+      "email": "student@example.com",
+      "first_name": "Ada",
+      "last_name": "Lovelace",
+      "joined_at": "2026-08-28T18:30:00+00:00"
+    }
+  ]
+}
+```
+
+### `POST /api/classes/<class_id>/students/<student_id>/remove`
+
+Requires ownership. Removes the specified enrollment and returns `{ "ok": true }`.
+
+### `GET /api/classes/<class_id>/students/<student_id>/progress`
+
+Requires ownership and current enrollment of the student. Returns the same array shape as `GET /api/progress`, restricted to assignments from classes owned by the requesting teacher. It never includes the student's personal lessons or another teacher's assignments.
+
+- `200`: progress array
+- `404`: class not owned or student not enrolled
+
+## Assignments
+
+Assignment status is `draft`, `published`, or `archived`. Teacher list routes omit archived assignments; student list routes return published assignments only.
+
+### `POST /api/classes/<class_id>/assignments`
+
+Requires ownership. Uploads a source document, creates a draft assignment, and queues lesson generation.
+
+Body: `multipart/form-data` with a `file` field. Accepted extensions are `.pdf`, `.docx`, and `.pptx`; the application-wide upload limit is 50 MB.
+
+- `202`: `{ "assignment_id": 25, "lesson_id": "20260828-183000-a1b2c3" }`
+- `400`: missing file or unsupported extension
+- `404`: class not owned
+- `413`: upload exceeds 50 MB
+
+### `GET /api/classes/<class_id>/assignments`
+
+Requires ownership. Returns non-archived assignments newest first. Each assignment includes `lesson`, containing status metadata plus its display label/progress, or `null` when metadata is unavailable.
+
+```json
+[
+  {
+    "id": 25,
+    "class_id": 12,
+    "lesson_id": "20260828-183000-a1b2c3",
+    "teacher_id": 4,
+    "status": "draft",
+    "title": null,
+    "due_at": null,
+    "max_attempts": null,
+    "created_at": "2026-08-28T18:30:00+00:00",
+    "published_at": null,
+    "lesson": { "status": "ready", "label": "Ready", "progress": 1.0 }
+  }
+]
+```
+
+### `GET /api/classes/<class_id>/student-assignments`
+
+Requires current enrollment. Returns published assignments sorted by due date, with assignments lacking a due date last. Each entry includes the same `lesson` metadata enrichment as the teacher list.
+
+### `GET /api/lessons/<lesson_id>/assignment`
+
+Owner-only lookup used while previewing a teacher's generated lesson.
+
+- `200`: assignment object
+- `200`: `{}` when the owned lesson is not an assignment
+- `404`: lesson not owned
+
+### `DELETE /api/classes/<class_id>/assignments/<assignment_id>`
+
+Requires class ownership and a `draft` assignment. Deletes the draft assignment and its lesson records.
+
+- `200`: `{ "ok": true }`
+- `400`: assignment is not a draft
+- `404`: class or assignment not found
+
+### `POST /api/classes/<class_id>/assignments/<assignment_id>/regenerate`
+
+Requires class ownership and a draft whose lesson is `ready` or `failed`. Restarts generation from the original upload with priority over normal queued jobs.
+
+- `202`: `{ "status": "regenerating" }`
+- `400`: lesson is still processing
+- `404`: class, draft, lesson metadata, or original upload not found
+
+### `POST /api/classes/<class_id>/assignments/<assignment_id>/publish`
+
+Requires class ownership and a draft assignment.
+
+```json
+{
+  "title": "Unit 3 Review",
+  "due_at": "2026-09-04T23:59:00.000Z",
+  "max_attempts": 3
+}
+```
+
+All three fields are nullable. An empty title is stored as `null`, causing the generated lesson title to be used.
+
+- `200`: `{ "ok": true }`
+- `404`: class not owned or assignment is not a draft
+
+### `PATCH /api/classes/<class_id>/assignments/<assignment_id>`
+
+Requires class ownership and a `published` assignment. Uses the same body as publish and replaces the title, due date, and maximum attempts with the supplied values.
+
+- `200`: `{ "ok": true }`
+- `404`: class not owned or assignment is not published
+
+### `POST /api/classes/<class_id>/assignments/<assignment_id>/archive`
+
+Requires class ownership. Sets the assignment status to `archived` and returns `{ "ok": true }`.
+
+## Lessons
+
+### `POST /api/lessons`
+
+Uploads a personal lesson and returns immediately while generation runs in the background.
+
+Body: `multipart/form-data` with a `file` field. Accepted extensions are `.pdf`, `.docx`, and `.pptx`; the upload limit is 50 MB.
+
+Students and anonymous sessions can own at most 10 personal lessons. Teacher uploads through this route are treated by the UI as temporary trial lessons and are not subject to that limit.
+
+- `202`: `{ "lesson_id": "20260828-183000-a1b2c3" }`
+- `400`: missing file, unsupported extension, or lesson limit reached
+- `413`: upload exceeds 50 MB
+
+### `GET /api/lessons`
+
+Lists lessons owned by the current anonymous session or signed-in user, newest first. Assigned lessons are not included; retrieve those through class/progress routes.
+
+```json
+[
+  {
+    "lesson_id": "20260828-183000-a1b2c3",
+    "status": "ready",
+    "source_filename": "chapter-3.pdf",
+    "course": "Linear Algebra",
+    "slide_count": 14,
+    "created_at": "2026-08-28T18:30:00+00:00",
+    "updated_at": "2026-08-28T18:34:00+00:00"
+  }
+]
+```
+
+### `GET /api/lessons/<lesson_id>/status`
+
+Returns lesson metadata enriched with a display `label` and numeric `progress`. This route is exempt from rate limiting and may be polled during generation.
+
+Statuses:
+
+| Status | Label | Progress |
+|---|---|---:|
+| `queued` | Queued | `0.0` |
+| `extracting` | Reading your document | `0.2` |
+| `building_curriculum` | Mapping out concepts | `0.5` |
+| `generating_slides` | Building your slides | `0.8` |
+| `ready` | Ready | `1.0` |
+| `failed` | Something went wrong | `null` |
+
+A failed lesson also records `failed_stage` and `error`.
+
+### `POST /api/lessons/<lesson_id>/retry`
+
+Owner-only. Resumes a failed lesson from its recorded stage and gives the retry priority over normal jobs.
+
+- `202`: `{ "status": "retrying" }`
+- `400`: lesson is not failed
+- `404`: lesson not owned, metadata missing, or original upload missing
+
+### `GET /api/lessons/<lesson_id>/slideshow`
+
+Returns generated slideshow JSON. A custom assignment title overrides `slideshow.course` in the response.
+
+- `200`: slideshow document
+- `404`: no access, slideshow is not generated, or the generated file is unreadable
+
+### `GET /api/lessons/<lesson_id>/curriculum`
+
+Returns the generated curriculum graph containing concepts and study material. A custom assignment title overrides the top-level `course` field.
+
+- `200`: curriculum document
+- `404`: no access, curriculum is not generated, or the generated file is unreadable
+
+### `GET /api/lessons/<lesson_id>/progress`
+
+Returns the current identity's database-backed progress row, or `{}` if no progress has been saved.
+
+```json
+{
+  "session_id": "...",
+  "user_id": 7,
+  "lesson_id": "20260828-183000-a1b2c3",
+  "last_viewed_slide": 4,
+  "completed": 0,
+  "updated_at": "2026-08-28T18:45:00+00:00"
+}
+```
+
+### `POST /api/lessons/<lesson_id>/progress`
+
+Upserts progress. Omitted fields retain their previous values.
+
+```json
+{ "last_viewed_slide": 4, "completed": false }
+```
+
+Returns `{ "ok": true }`.
+
+### `GET /api/progress`
+
+Returns every ready personal lesson owned by the caller plus published or archived class assignments available through the caller's enrollments. Each entry includes lesson metadata, progress, quiz history with resolved concept names, and its source.
+
+```json
+[
+  {
+    "lesson": { "lesson_id": "...", "status": "ready", "course": "Linear Algebra" },
+    "progress": { "last_viewed_slide": 4, "completed": 0 },
+    "quiz_history": [
+      { "concept_id": "c003", "concept_name": "Eigenvalues", "is_correct": 1 }
+    ],
+    "source": {
+      "type": "class",
+      "class_name": "Algebra I",
+      "due_at": "2026-09-04T23:59:00.000Z",
+      "title": "Unit 3 Review",
+      "archived": false
+    }
+  }
+]
+```
+
+Personal lessons use `{ "type": "personal", "archived": false }` as their source.
+
+### `DELETE /api/lessons/<lesson_id>`
+
+Owner-only. Deletes the generated folder and the owner's lesson record. For assignment-backed lessons, draft assignment data is deleted; a non-draft assignment is archived and submission history is preserved.
+
+- `200`: `{ "ok": true }`
+- `404`: lesson not owned
+
+### `GET /api/lessons/<lesson_id>/media/<filename>`
+
+Serves a generated lesson file such as a Manim `.mp4`.
+
+- `200`: file response
+- `400`: path would escape the lesson directory
+- `404`: no access or file does not exist
+
+## Quizzes
+
+Questions are generated per concept and identified by `question_id`. The obsolete single-question `question_index` submission route is no longer available.
+
+### `GET /api/lessons/<lesson_id>/concepts/<concept_id>/quiz`
+
+Returns the active generated question set and attempt information.
+
+```json
+{
+  "questions": [
+    {
+      "question_id": "..._c003_b0_q000",
+      "concept_id": "c003",
+      "question_text": "Which statement is correct?",
+      "type": "multiple_choice",
+      "choices": ["A", "B", "C", "D"],
+      "answer": "B",
+      "explanation": "...",
+      "generation_batch": 0,
+      "active": 1
+    }
+  ],
+  "max_attempts": 3,
+  "attempts_used": 1
+}
+```
+
+`max_attempts` and `attempts_used` apply only when an enrolled student opens an assignment. Owners receive `null` and `0` respectively.
+
+### `POST /api/lessons/<lesson_id>/quiz-attempt-batch`
+
+Grades a batch of question IDs. The server derives each concept and correct answer from the stored question.
+
+```json
+{
+  "attempts": [
+    { "question_id": "..._c003_b0_q000", "answer_given": "B" },
+    { "question_id": "..._c003_b0_q001", "answer_given": "True" }
+  ],
+  "review": false
+}
+```
+
+For an assignment student, the batch counts as one attempt per touched concept and is recorded under one timestamp. Questions from exhausted concepts are skipped. Owner previews and requests with `review: true` are graded by the client but not added to history.
+
+```json
+{
+  "ok": true,
+  "touched_concept_ids": ["c003"],
+  "exhausted_concept_ids": []
+}
+```
+
+Unknown question IDs and IDs belonging to another lesson are ignored.
+
+### `GET /api/lessons/<lesson_id>/quiz-history`
+
+Returns attempts oldest first. Add `?concept_id=c003` to restrict the result to one concept.
+
+Each row includes the question snapshot, given/correct answers, explanation, `is_correct`, `attempt_number`, and `submitted_at`.
+
+## Saved Study Items
+
+### `GET /api/lessons/<lesson_id>/saved-items`
+
+Returns saved key terms, formulas, flashcards, or quiz snapshots for the current identity.
+
+```json
+[
+  {
+    "lesson_id": "...",
+    "item_id": "quiz-c003-0",
+    "item_type": "quiz",
+    "content": { "question_id": "...", "question_text": "..." },
+    "created_at": "2026-08-28T18:45:00+00:00"
+  }
+]
+```
+
+### `POST /api/lessons/<lesson_id>/saved-items/<item_id>`
+
+Idempotently saves an item for the current identity.
+
+```json
+{ "item_type": "quiz", "content": { "question_id": "..." } }
+```
+
+`content` is optional and is stored as a JSON snapshot. Returns `{ "ok": true }`.
+
+### `DELETE /api/lessons/<lesson_id>/saved-items/<item_id>`
+
+Idempotently removes an item and returns `{ "ok": true }`.
+
+## Definition And Equation Cards
+
+Results are held in an in-process LRU cache keyed by lesson, content, and context. The cache is not persistent and is not shared across gunicorn workers.
 
 ### `POST /api/lessons/<lesson_id>/info/definition`
-**Body**
+
 ```json
-{ "term": "eigenvalue", "definition_on_slide": "...", "context": "Linear Algebra unit 3", "slide_text": "..." }
+{
+  "term": "eigenvalue",
+  "definition_on_slide": "...",
+  "context": "Linear Algebra - Unit 3",
+  "slide_text": "..."
+}
 ```
-`term` is required; the rest are optional context to improve relevance.
 
-**Responses**
-- `200` — `{ "term": "...", "part_of_speech": "noun", "definition": "...", "examples": ["...", "...", "..."] }`
-- `400` — missing `term`
-- `404` — lesson not found / not owned
-- `503` — upstream AI service temporarily unavailable (safe to retry)
+Only `term` is required.
 
----
+```json
+{
+  "term": "eigenvalue",
+  "part_of_speech": "noun",
+  "definition": "...",
+  "examples": ["...", "...", "..."]
+}
+```
+
+- `400`: missing term
+- `404`: no lesson access
+- `503`: upstream AI service temporarily unavailable
 
 ### `POST /api/lessons/<lesson_id>/info/equation`
-**Body**
+
 ```json
-{ "latex": "\\frac{d}{dx}x^2", "context": "Calculus unit 1", "slide_text": "..." }
+{
+  "latex": "\\frac{d}{dx}x^2",
+  "context": "Calculus - Unit 1",
+  "slide_text": "..."
+}
 ```
-`latex` is required.
 
-**Responses**
-- `200` — structured equation explanation (steps, worked example, LaTeX-formatted)
-- `400` — missing `latex`
-- `404` — lesson not found / not owned
-- `503` — upstream AI service temporarily unavailable
+Only `latex` is required. The structured response contains `latex`, `description`, `variables`, `constraints`, and three worked `examples` with step arrays.
 
----
+- `400`: missing LaTeX
+- `404`: no lesson access
+- `503`: upstream AI service temporarily unavailable
 
-## Text-to-speech
+## Narration And Speech Recognition
 
 ### `POST /api/tts`
-Converts narration text to audio. Not lesson-scoped or cached — each call synthesizes fresh audio.
 
-**Body:** `{ "text": "..." }`
-**Response:** `200` — raw `audio/wav` bytes (not JSON — read as a blob)
-**Error:** `400` — empty text; `502` — upstream TTS service error
+Synthesizes narration using the configured TTS model.
 
-Tutor avatar speech uses the same backend TTS service server-side, then forwards the generated WAV to LiveTalking over `/humanaudio`; the browser should listen to the WebRTC stream rather than playing a separate WAV.
+```json
+{ "text": "Narrate this slide." }
+```
 
-Tutor `/avatar/interrupt` and `/avatar/speak` requests include the current positive integer `attempt_id`. Starting a newer attempt invalidates older speech work across backend workers; superseded `/avatar/speak` requests return `409` and never upload stale audio.
+- `200`: raw `audio/wav` response
+- `400`: empty text
+- `502`: upstream TTS failure; the JSON error may include `upstream`
 
----
-
-## Speech-to-text configuration
+Long text is split at sentence/word boundaries according to `TTS_MAX_CHARS_PER_REQUEST`, synthesized in chunks, and merged into one compatible WAV response.
 
 ### `GET /api/stt/config`
-Returns the browser-facing streaming STT WebSocket URL configured through `STT_WEBSOCKET_URL`.
 
-**Response:** `200` — `{ "websocket_url": "ws://stt.example/audio/stt" }`
+Returns the browser-facing WebSocket URL configured by `STT_WEBSOCKET_URL` and sets `Cache-Control: no-store`.
 
-**Error:** `503` — STT is missing or is not a valid `ws://` or `wss://` URL.
-
-The browser connects directly to this URL. This endpoint does not initialize an STT model or proxy audio.
-
-The tutor microphone expects a Deepgram-compatible streaming endpoint, such as WhisperLiveKit's `/v1/listen`,
-configured for 16 kHz mono `linear16` audio with interim results and VAD events enabled. During recording, the
-browser displays interim and finalized transcript text in the chat input. A non-empty `speech_final` result is
-shown for 600 ms and then submitted through the same tutor message flow as typed text. New speech or any normal
-recording cancellation clears the pending submission. Recordings are limited to 60 seconds and transcripts to
-2,000 characters; reaching either limit submits the current non-empty transcript. Hiding the page or detecting
-a long timer gap after device sleep cancels and discards the active recording.
-
----
-
-## Error shape
-
-Outside of file/audio responses, errors are always JSON:
 ```json
-{ "error": "human-readable message" }
+{
+  "websocket_url": "ws://127.0.0.1:8002/v1/listen?language=en&encoding=linear16&sample_rate=16000&channels=1"
+}
 ```
-Unhandled server exceptions on any `/api/*` route return a generic `500 { "error": "Internal server error" }` rather than leaking a stack trace.
+
+- `200`: valid `ws://` or `wss://` URL
+- `503`: missing or invalid URL
+
+The browser connects directly to this endpoint. The Flask route does not initialize a model or proxy audio. The tutor UI expects a Deepgram-compatible stream with interim results and VAD events. It sends 16 kHz mono `linear16` audio, limits recording to 60 seconds and transcripts to 2,000 characters, and submits finalized speech through the tutor message flow.
+
+## Tutor And LiveTalking Avatar
+
+All routes in this section require lesson access. `sessionid` values are LiveTalking avatar session IDs and must contain 1-128 letters, digits, underscores, or hyphens. A positive integer `attempt_id` orders tutor requests so newer messages can invalidate stale speech work across backend workers.
+
+### `POST /api/lessons/<lesson_id>/avatar/webrtc/offer`
+
+Proxies a browser WebRTC offer to LiveTalking.
+
+```json
+{ "type": "offer", "sdp": "..." }
+```
+
+The response body, status, and content type come from LiveTalking. Its successful response normally contains the SDP answer and avatar `sessionid`.
+
+- `400`: invalid body, type, or SDP
+- `404`: no lesson access
+- `502`: LiveTalking signaling unavailable
+
+### `POST /api/lessons/<lesson_id>/tutor/message`
+
+Generates a concise plain-text tutor reply grounded in the lesson.
+
+```json
+{
+  "message": "Why is this eigenvalue negative?",
+  "history": [
+    { "role": "user", "content": "What does this matrix represent?" },
+    { "role": "assistant", "content": "It represents the linear transformation..." }
+  ],
+  "scene": "slideshow",
+  "current_slide_index": 4,
+  "active_concept_id": null
+}
+```
+
+- `message` is required and limited to 2,000 characters.
+- `history` may contain at most 50 entries; only the last 12 are used. Each role must be `user` or `assistant`, each message is limited to 2,000 characters, and the used history is limited to 12,000 characters total.
+- `scene`, when present, must be `slideshow` or `study`.
+- `current_slide_index` is zero-based and must identify an existing slide when provided.
+- `active_concept_id` is optional and limited to 128 characters.
+
+The context includes the course and concept map, the current slide and speaker notes, the active study concept, and up to five question-relevant concepts.
+
+- `200`: `{ "reply": "..." }`
+- `400`: invalid message, history, or location fields
+- `404`: no lesson access or generated lesson context unavailable
+- `500`: stored lesson context is invalid
+- `502`: tutor LLM failure or empty response
+
+### `POST /api/lessons/<lesson_id>/avatar/speak`
+
+Synthesizes the reply with the tutor TTS configuration and sends the WAV to LiveTalking.
+
+```json
+{
+  "sessionid": "avatar-session-id",
+  "attempt_id": 8,
+  "text": "An eigenvalue can be negative when...",
+  "interrupt": true
+}
+```
+
+`text` is limited to 2,000 characters. `interrupt` defaults to `true`. Mathematical symbols and common units are normalized for speech before synthesis.
+
+- `200`: `{ "ok": true }`
+- `400`: invalid body, IDs, text, or `interrupt`
+- `409`: `{ "error": "Tutor response was superseded", "superseded": true }`
+- `502`: TTS or LiveTalking failure
+- `503`: Redis-backed tutor coordination unavailable
+
+The browser hears this audio through the WebRTC avatar stream; it should not play a separate WAV response.
+
+### `POST /api/lessons/<lesson_id>/avatar/interrupt`
+
+Marks the supplied attempt as current and asks LiveTalking to stop queued/current speech.
+
+```json
+{ "sessionid": "avatar-session-id", "attempt_id": 9 }
+```
+
+- `200`: `{ "ok": true }`
+- `400`: invalid body or IDs
+- `502`: LiveTalking failure
+- `503`: tutor coordination unavailable
+
+### `POST /api/lessons/<lesson_id>/avatar/speaking`
+
+Polls LiveTalking's speaking state.
+
+```json
+{ "sessionid": "avatar-session-id" }
+```
+
+- `200`: `{ "speaking": true }`
+- `400`: invalid body or session ID
+- `502`: LiveTalking failure or malformed upstream state
+
+### `POST /api/lessons/<lesson_id>/avatar/disconnect`
+
+Closes and releases the LiveTalking session.
+
+```json
+{ "sessionid": "avatar-session-id" }
+```
+
+- `200`: `{ "ok": true, "closed": true }`
+- `400`: invalid body or session ID
+- `502`: LiveTalking failure or malformed upstream response
