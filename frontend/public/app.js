@@ -23,6 +23,7 @@ let infoPanelOpen = false;
 let activeInfoElement = null;
 let selectedConcept = null;
 let pronounceAudio = null;          // separate from currentAudio — never touches narration playback
+let pronounceRequestId = 0;
 const pronounceCache = new Map();   // term text → blob URL
 const PRONOUNCE_CACHE_LIMIT = 10;
 
@@ -31,6 +32,10 @@ let currentSpeed = 1;
 let currentVolume = 1;
 let currentAudio = null;
 let audioPaused = false;
+let tutorPanelOpen = false;
+let tutorPausedNarration = false;
+let tutorDeferredNarration = false;
+let tutorAllowsNarration = false;
 const ttsCache = new Map();      // notes text → blob URL, cached for the session
 const TTS_CACHE_LIMIT = 5;
 let ttsRequestId = 0;
@@ -797,6 +802,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 function enterLesson(id) {
   lessonId = id;
   document.getElementById("class-detail-screen").classList.add("hidden");
+  document.getElementById("tutor-chat-messages").innerHTML = "";
   const scene = new URLSearchParams(window.location.search).get("scene");
   history.replaceState(null, "", scene ? `?lesson=${id}&scene=${scene}` : `?lesson=${id}`);
   showScreen("loading");
@@ -940,6 +946,7 @@ async function loadSlideshow(justGenerated = false) {
 // ─── Welcome screen ───────────────────────────────────────────────────────────
 function showWelcome() {
   lastScene = "welcome"; // so Back-from-Progress can return here
+  setTutorWidgetVisible(false);
   document.getElementById("welcome-screen").classList.remove("hidden");
   document.getElementById("loading-screen").classList.add("hidden");
   document.getElementById("slideshow").classList.add("hidden");
@@ -1747,6 +1754,7 @@ function showScreen(name) {
     document.getElementById("loading-screen").classList.add("hidden");
     document.getElementById("error-screen").classList.add("hidden");
   }
+  setTutorWidgetVisible(name === "slideshow");
 }
 
 // ─── Slide rendering ──────────────────────────────────────────────────────────
@@ -1805,7 +1813,14 @@ function renderSlide(index) {
     const notes = slide.speaker_notes;
     const snapId = ttsRequestId;   // snapshot before any async gap
 
-    if (cacheGet(notes)) {
+    if (tutorPanelOpen && !tutorAllowsNarration) {
+      const btn = document.getElementById("tts-narrate-btn");
+      tutorDeferredNarration = true;
+      setNarrationButtonPlaying(false);
+      btn.disabled = false;
+      btn.onclick = () => toggleNarrationFromControl(notes, btn);
+      prefetchTTS(notes);
+    } else if (cacheGet(notes)) {
       // Cached — short delay then autoplay
       autoPlayTimer = setTimeout(() => {
         autoPlayTimer = null;
@@ -1816,7 +1831,7 @@ function renderSlide(index) {
           // User cancelled during the 2s wait — leave as paused
           btn.textContent = "▶";
           btn.classList.remove("tts-btn-active");
-          btn.onclick = () => speakNotes(notes, btn);
+          btn.onclick = () => toggleNarrationFromControl(notes, btn);
         }
       }, 2000);
     } else {
@@ -2322,6 +2337,8 @@ function fitSlideToStage() {
   const stageW  = stage.clientWidth  - 48; // 24px padding each side
   const stageH  = stage.clientHeight - padH;
 
+  if (stageW <= 0 || stageH <= 0) return; // stage not laid out yet (still hidden). bail, caller will re-trigger once visible
+
   const scaleByW = stageW / slideW;
   const scaleByH = stageH / slideH;
   const scale    = Math.min(1, scaleByW, scaleByH);
@@ -2356,6 +2373,1735 @@ function toggleSidebar() {
   // refit slide after grid transition completes
   setTimeout(fitSlideToStage, 220);
 }
+
+// ─── Tutor session (LiveTalking WebRTC stream) ────────────────────────────────
+const TUTOR_SPEAKING_POLL_INTERVAL_MS = 500;
+const TUTOR_SPEAKING_START_TIMEOUT_MS = 30000;
+const TUTOR_SPEAKING_IDLE_CONFIRMATIONS = 2;
+const TUTOR_WEBRTC_READY_TIMEOUT_MS = 20000;
+const TUTOR_WEBRTC_DISCONNECTED_GRACE_MS = 5000;
+const TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS = 3;
+const TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS = 1000;
+
+const TutorSession = {
+  peerConnection: null,
+  sessionId: null,
+  activeLessonId: null,
+  remoteStream: null,
+  connectionReady: false,
+  connectingPromise: null,
+  disconnecting: false,
+  connectionAttempt: 0,
+  disconnectedGraceTimer: null,
+  recoveryTimer: null,
+  recoveryAttempt: 0,
+  conversationLessonId: null,
+  conversation: [],
+  speechState: "idle",
+  speakingPollTimer: null,
+  speakingMonitorId: 0,
+  messageAttempt: 0,
+  replyAbortController: null,
+  activePendingReply: null,
+
+  async connect(activeLessonId, { recovery = false } = {}) {
+    if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
+    if (
+      this.activeLessonId === activeLessonId &&
+      this.sessionId &&
+      this.connectionReady &&
+      this.peerConnection?.connectionState === "connected"
+    ) {
+      return this.sessionId;
+    }
+    if (this.activeLessonId === activeLessonId && this.connectingPromise) {
+      return this.connectingPromise;
+    }
+
+    const releasePromise = this.disconnect({ preserveRecovery: recovery });
+    this.activeLessonId = activeLessonId;
+    const connectionAttempt = this.connectionAttempt;
+    let connectingPromise;
+    connectingPromise = releasePromise
+      .then(() => {
+        if (this.connectionAttempt !== connectionAttempt) {
+          throw new Error("Tutor connection was superseded.");
+        }
+        return this._connect(activeLessonId);
+      })
+      .then((sessionId) => {
+        if (
+          this.connectionAttempt !== connectionAttempt ||
+          this.activeLessonId !== activeLessonId ||
+          !this._isPeerMediaReady(this.peerConnection)
+        ) {
+          throw new Error("Avatar media became unavailable while connecting.");
+        }
+        this.connectionReady = true;
+        this._cancelRecovery();
+        return sessionId;
+      })
+      .catch((err) => {
+        if (this.connectionAttempt === connectionAttempt) {
+          this.disconnect({ preserveRecovery: recovery });
+        }
+        throw err;
+      })
+      .finally(() => {
+        if (this.connectingPromise === connectingPromise) this.connectingPromise = null;
+      });
+    this.connectingPromise = connectingPromise;
+    return connectingPromise;
+  },
+
+  async _connect(activeLessonId) {
+    const videoEl = document.getElementById("tutor-chat-avatar-video");
+    if (!videoEl) throw new Error("Tutor avatar video element is missing.");
+    videoEl.muted = true;
+
+    const pc = new RTCPeerConnection({ sdpSemantics: "unified-plan" });
+
+    this.peerConnection = pc;
+    this.sessionId = null;
+    this.remoteStream = new MediaStream();
+    this.connectionReady = false;
+    videoEl.srcObject = this.remoteStream;
+
+    pc.addEventListener("track", (event) => {
+      if (pc !== this.peerConnection || !this.remoteStream) return;
+      if (!this.remoteStream.getTracks().includes(event.track)) {
+        this.remoteStream.addTrack(event.track);
+      }
+      event.track.addEventListener("ended", () => {
+        if (pc !== this.peerConnection || !this.connectionReady) return;
+        this._handleUnexpectedConnectionLoss(pc);
+      }, { once: true });
+      videoEl.play().catch((err) => console.debug("Tutor avatar autoplay deferred:", err));
+    });
+
+    pc.addEventListener("connectionstatechange", () => {
+      console.debug("[TutorSession] peer connection:", pc.connectionState);
+      this._handlePeerConnectionState(pc);
+    });
+
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await this._waitForIceGatheringComplete(pc);
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+
+    const answer = await this._signal(activeLessonId, {
+      sdp: pc.localDescription.sdp,
+      type: pc.localDescription.type,
+    });
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+    await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+    if (this.peerConnection !== pc) {
+      throw new Error("Tutor connection was closed.");
+    }
+    this.sessionId = String(answer.sessionid);
+    await this._waitForConnectionReady(pc);
+    if (!this._isPeerMediaReady(pc)) {
+      throw new Error("Avatar media became unavailable while connecting.");
+    }
+    return this.sessionId;
+  },
+
+  async _signal(activeLessonId, body) {
+    const res = await fetch(`/api/lessons/${encodeURIComponent(activeLessonId)}/avatar/webrtc/offer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.sdp || !data.type || data.sessionid === undefined) {
+      throw new Error(data.error || data.msg || "LiveTalking signaling failed.");
+    }
+    return data;
+  },
+
+  _waitForIceGatheringComplete(pc) {
+    if (pc.iceGatheringState === "complete") return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      let timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        pc.removeEventListener("icegatheringstatechange", checkState);
+        pc.removeEventListener("signalingstatechange", checkState);
+      };
+
+      const checkState = () => {
+        if (pc.signalingState === "closed") {
+          cleanup();
+          reject(new Error("Tutor connection was closed."));
+        } else if (pc.iceGatheringState === "complete") {
+          cleanup();
+          resolve();
+        }
+      };
+      timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("Timed out gathering WebRTC connection candidates."));
+      }, 15000);
+      pc.addEventListener("icegatheringstatechange", checkState);
+      pc.addEventListener("signalingstatechange", checkState);
+      checkState();
+    });
+  },
+
+  _waitForConnectionReady(pc) {
+    return new Promise((resolve, reject) => {
+      let timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        pc.removeEventListener("connectionstatechange", checkReady);
+        pc.removeEventListener("track", checkReady);
+      };
+      const fail = (message) => {
+        cleanup();
+        reject(new Error(message));
+      };
+      const checkReady = () => {
+        if (pc !== this.peerConnection || pc.connectionState === "closed") {
+          fail("Tutor connection was closed.");
+          return;
+        }
+        if (pc.connectionState === "failed") {
+          fail("Avatar WebRTC connection failed.");
+          return;
+        }
+        if (this._isPeerMediaReady(pc)) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      timeout = setTimeout(() => {
+        fail("Timed out waiting for the avatar media stream.");
+      }, TUTOR_WEBRTC_READY_TIMEOUT_MS);
+      pc.addEventListener("connectionstatechange", checkReady);
+      pc.addEventListener("track", checkReady);
+      checkReady();
+    });
+  },
+
+  _isPeerMediaReady(pc) {
+    const hasAudio = this.remoteStream
+      ?.getAudioTracks()
+      .some((track) => track.readyState === "live");
+    const hasVideo = this.remoteStream
+      ?.getVideoTracks()
+      .some((track) => track.readyState === "live");
+    return Boolean(
+      pc &&
+      pc === this.peerConnection &&
+      pc.connectionState === "connected" &&
+      hasAudio &&
+      hasVideo
+    );
+  },
+
+  _handlePeerConnectionState(pc) {
+    if (pc !== this.peerConnection) return;
+    if (pc.connectionState === "connected") {
+      this._clearDisconnectedGrace();
+      return;
+    }
+    if (!this.connectionReady) return;
+    if (pc.connectionState === "disconnected") {
+      if (this.disconnectedGraceTimer !== null) return;
+      this.disconnectedGraceTimer = setTimeout(() => {
+        this.disconnectedGraceTimer = null;
+        if (pc === this.peerConnection && pc.connectionState === "disconnected") {
+          this._handleUnexpectedConnectionLoss(pc);
+        }
+      }, TUTOR_WEBRTC_DISCONNECTED_GRACE_MS);
+      return;
+    }
+    if (pc.connectionState === "failed") {
+      this._handleUnexpectedConnectionLoss(pc);
+    }
+  },
+
+  _handleUnexpectedConnectionLoss(pc) {
+    if (pc !== this.peerConnection || !this.connectionReady || this.disconnecting) return;
+    const interruptedLessonId = this.activeLessonId;
+    const shouldRecover = this._canRecover(interruptedLessonId);
+    this.connectionReady = false;
+    this._clearDisconnectedGrace();
+    this.cancelActiveMessage();
+    setTutorConnectionStatus(
+      shouldRecover ? "Avatar connection lost. Reconnecting..." : "Avatar connection lost.",
+      !shouldRecover,
+      { retry: !shouldRecover }
+    );
+    this.disconnect({ preserveRecovery: shouldRecover });
+    if (shouldRecover) this._scheduleRecovery(interruptedLessonId);
+  },
+
+  _canRecover(activeLessonId) {
+    const widget = document.getElementById("tutor-chat-widget");
+    const panel = document.getElementById("tutor-chat-panel");
+    return Boolean(
+      activeLessonId &&
+      lessonId === activeLessonId &&
+      widget &&
+      !widget.classList.contains("hidden") &&
+      panel &&
+      !panel.classList.contains("hidden")
+    );
+  },
+
+  _scheduleRecovery(activeLessonId) {
+    if (!this._canRecover(activeLessonId)) {
+      this._cancelRecovery();
+      return;
+    }
+    if (this.recoveryAttempt >= TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS) {
+      this._cancelRecovery();
+      setTutorConnectionStatus("Could not restore the avatar connection.", true, { retry: true });
+      return;
+    }
+
+    this.recoveryAttempt += 1;
+    const attemptNumber = this.recoveryAttempt;
+    const delay = TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS * (2 ** (attemptNumber - 1));
+    setTutorConnectionStatus(
+      `Reconnecting avatar (${attemptNumber}/${TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS})...`
+    );
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (!this._canRecover(activeLessonId)) {
+        this._cancelRecovery();
+        return;
+      }
+      this.connect(activeLessonId, { recovery: true })
+        .then(() => {
+          if (!this._canRecover(activeLessonId)) {
+            this.disconnect();
+            return;
+          }
+          setTutorConnectionStatus("");
+        })
+        .catch((err) => {
+          console.debug(`[TutorSession] recovery attempt ${attemptNumber} failed:`, err);
+          this._scheduleRecovery(activeLessonId);
+        });
+    }, delay);
+  },
+
+  _clearDisconnectedGrace() {
+    if (this.disconnectedGraceTimer === null) return;
+    clearTimeout(this.disconnectedGraceTimer);
+    this.disconnectedGraceTimer = null;
+  },
+
+  _cancelRecovery({ resetAttempts = true } = {}) {
+    this._clearDisconnectedGrace();
+    if (this.recoveryTimer !== null) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+    if (resetAttempts) this.recoveryAttempt = 0;
+  },
+
+  cancelRecovery() {
+    this._cancelRecovery();
+  },
+
+  disconnect({ preserveRecovery = false } = {}) {
+    resumeTutorAvatarAfterInterrupt({ play: false });
+    this._clearDisconnectedGrace();
+    if (!preserveRecovery) this._cancelRecovery();
+    if (this.disconnecting) return Promise.resolve(false);
+    this.disconnecting = true;
+    const releaseRequest = this._avatarControl("disconnect", { keepalive: true }).catch((err) => {
+      console.debug("[TutorSession] remote session release unavailable:", err);
+      return null;
+    });
+    this.connectionAttempt += 1;
+    this.connectingPromise = null;
+    this.connectionReady = false;
+    const videoEl = document.getElementById("tutor-chat-avatar-video");
+    try {
+      if (videoEl) videoEl.srcObject = null;
+      this.remoteStream?.getTracks().forEach((track) => track.stop());
+      this.remoteStream = null;
+      this.peerConnection?.close();
+      this.peerConnection = null;
+      this.sessionId = null;
+      this.activeLessonId = null;
+    } catch (err) {
+      console.warn("[TutorSession] disconnect cleanup failed:", err);
+    } finally {
+      this.disconnecting = false;
+    }
+    return releaseRequest.then((data) => data?.ok === true);
+  },
+
+  async _speakEcho(text, { attemptId, interrupt = true, signal } = {}) {
+    if (!this.activeLessonId || !this.sessionId) {
+      throw new Error("Tutor avatar is not connected.");
+    }
+
+    const res = await fetch(
+      `/api/lessons/${encodeURIComponent(this.activeLessonId)}/avatar/speak`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal,
+        body: JSON.stringify({
+          sessionid: this.sessionId,
+          text,
+          interrupt,
+          attempt_id: attemptId,
+        }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok !== true) {
+      throw new Error(data.error || "LiveTalking speech request failed.");
+    }
+    return data;
+  },
+
+  _setSpeechState(state) {
+    this.speechState = state;
+    const avatar = document.getElementById("tutor-chat-avatar");
+    if (avatar) avatar.dataset.speechState = state;
+    this._syncAudioMute();
+  },
+
+  _syncAudioMute() {
+    const panel = document.getElementById("tutor-chat-panel");
+    const videoEl = document.getElementById("tutor-chat-avatar-video");
+    if (!panel || !videoEl) return;
+    const canSpeak = ["preparing", "speaking"].includes(this.speechState);
+    videoEl.muted = panel.classList.contains("hidden") || !canSpeak;
+  },
+
+  _stopSpeakingMonitor() {
+    this.speakingMonitorId += 1;
+    if (this.speakingPollTimer !== null) {
+      clearTimeout(this.speakingPollTimer);
+      this.speakingPollTimer = null;
+    }
+  },
+
+  async _avatarControl(action, { attemptId = null, keepalive = false } = {}) {
+    const activeLessonId = this.activeLessonId;
+    const avatarSessionId = this.sessionId;
+    if (!activeLessonId || !avatarSessionId) return null;
+
+    const payload = { sessionid: avatarSessionId };
+    if (Number.isInteger(attemptId)) payload.attempt_id = attemptId;
+
+    const res = await fetch(
+      `/api/lessons/${encodeURIComponent(activeLessonId)}/avatar/${action}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive,
+        body: JSON.stringify(payload),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Avatar ${action} request failed.`);
+    return data;
+  },
+
+  async interruptSpeech(attemptId = this.messageAttempt, { preserveState = false } = {}) {
+    this._stopSpeakingMonitor();
+    if (!preserveState) this._setSpeechState("idle");
+    const data = await this._avatarControl("interrupt", { attemptId });
+    return data?.ok === true;
+  },
+
+  async _getSpeakingState() {
+    const data = await this._avatarControl("speaking");
+    if (!data || typeof data.speaking !== "boolean") return false;
+    return data.speaking;
+  },
+
+  _startSpeakingMonitor() {
+    resumeTutorAvatarAfterInterrupt();
+    this._stopSpeakingMonitor();
+    const monitorId = this.speakingMonitorId;
+    const startedAt = Date.now();
+    let observedSpeaking = false;
+    let idleChecks = 0;
+    this._setSpeechState("preparing");
+
+    const poll = async () => {
+      if (monitorId !== this.speakingMonitorId) return;
+      try {
+        const speaking = await this._getSpeakingState();
+        if (monitorId !== this.speakingMonitorId) return;
+        if (speaking) {
+          observedSpeaking = true;
+          idleChecks = 0;
+          this._setSpeechState("speaking");
+        } else if (observedSpeaking) {
+          idleChecks += 1;
+          if (idleChecks >= TUTOR_SPEAKING_IDLE_CONFIRMATIONS) {
+            this._stopSpeakingMonitor();
+            this._setSpeechState("idle");
+            return;
+          }
+        } else if (Date.now() - startedAt >= TUTOR_SPEAKING_START_TIMEOUT_MS) {
+          this._stopSpeakingMonitor();
+          this._setSpeechState("idle");
+          return;
+        }
+      } catch (err) {
+        console.debug("[TutorSession] speaking status unavailable:", err);
+        if (Date.now() - startedAt >= TUTOR_SPEAKING_START_TIMEOUT_MS) {
+          this._stopSpeakingMonitor();
+          this._setSpeechState("idle");
+          return;
+        }
+      }
+      this.speakingPollTimer = setTimeout(poll, TUTOR_SPEAKING_POLL_INTERVAL_MS);
+    };
+
+    this.speakingPollTimer = setTimeout(poll, 250);
+  },
+
+  _markPendingReplyInterrupted() {
+    const bubble = this.activePendingReply;
+    if (!bubble?.isConnected || bubble.dataset.pending !== "true") return;
+    bubble.dataset.pending = "false";
+    bubble.textContent = "Interrupted.";
+    bubble.classList.add("tutor-chat-bubble-interrupted");
+    scheduleTutorAvatarSizeUpdate();
+  },
+
+  beginMessageAttempt() {
+    this._markPendingReplyInterrupted();
+    this.activePendingReply = null;
+    this.replyAbortController?.abort();
+    this.messageAttempt += 1;
+    this.replyAbortController = new AbortController();
+    this._stopSpeakingMonitor();
+    this._setSpeechState("thinking");
+    return {
+      id: this.messageAttempt,
+      controller: this.replyAbortController,
+      signal: this.replyAbortController.signal,
+    };
+  },
+
+  registerPendingReply(attemptId, bubble) {
+    if (!this.isCurrentMessageAttempt(attemptId)) return;
+    bubble.dataset.pending = "true";
+    this.activePendingReply = bubble;
+  },
+
+  resolvePendingReply(attemptId) {
+    if (!this.isCurrentMessageAttempt(attemptId)) return;
+    if (this.activePendingReply) this.activePendingReply.dataset.pending = "false";
+    this.activePendingReply = null;
+  },
+
+  isCurrentMessageAttempt(attemptId) {
+    return attemptId === this.messageAttempt;
+  },
+
+  cancelActiveMessage() {
+    this._markPendingReplyInterrupted();
+    this.activePendingReply = null;
+    this.replyAbortController?.abort();
+    this.replyAbortController = null;
+    this.messageAttempt += 1;
+    this._stopSpeakingMonitor();
+    this._setSpeechState("idle");
+  },
+
+  finishMessageAttempt(attemptId, controller) {
+    if (!this.isCurrentMessageAttempt(attemptId) || this.replyAbortController !== controller) return;
+    this.replyAbortController = null;
+  },
+
+  _getContextLocation() {
+    const studyVisible = !document.getElementById("study").classList.contains("hidden");
+    const scene = studyVisible ? "study" : "slideshow";
+    const selectedStudyConcept =
+      scene === "study" && activeConceptId && !activeConceptId.startsWith("__")
+        ? activeConceptId
+        : null;
+    return {
+      scene,
+      current_slide_index: scene === "slideshow" && Number.isInteger(current) ? current : null,
+      active_concept_id: selectedStudyConcept,
+    };
+  },
+
+  async _requestTutorReply(activeLessonId, text, attempt) {
+    if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
+    if (this.conversationLessonId !== activeLessonId) {
+      this.clearConversation();
+      this.conversationLessonId = activeLessonId;
+    }
+
+    const res = await fetch(`/api/lessons/${encodeURIComponent(activeLessonId)}/tutor/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: attempt.signal,
+      body: JSON.stringify({
+        message: text,
+        history: this.conversation.slice(-12),
+        ...this._getContextLocation(),
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!this.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor response was superseded.", "AbortError");
+    }
+    if (!res.ok || typeof data.reply !== "string" || !data.reply.trim()) {
+      throw new Error(data.error || "Tutor response request failed.");
+    }
+    if (lessonId !== activeLessonId || this.conversationLessonId !== activeLessonId) {
+      throw new Error("Tutor response belongs to a lesson that is no longer active.");
+    }
+
+    const reply = data.reply.trim();
+    this.conversation.push(
+      { role: "user", content: text },
+      { role: "assistant", content: reply }
+    );
+    if (this.conversation.length > 24) {
+      this.conversation.splice(0, this.conversation.length - 24);
+    }
+    return reply;
+  },
+
+  clearConversation() {
+    this.conversationLessonId = null;
+    this.conversation = [];
+  },
+
+  async sendMessage(text, attempt) {
+    return this._requestTutorReply(lessonId, text, attempt);
+  },
+
+  async speakMessage(text, attempt) {
+    if (this.activeLessonId !== lessonId || !this.sessionId) {
+      await this.connect(lessonId);
+    }
+    if (!this.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor speech was superseded.", "AbortError");
+    }
+    this._setSpeechState("preparing");
+    const result = await this._speakEcho(text, {
+      attemptId: attempt.id,
+      interrupt: true,
+      signal: attempt.signal,
+    });
+    if (!this.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor speech was superseded.", "AbortError");
+    }
+    this._startSpeakingMonitor();
+    return result;
+  },
+};
+
+const TUTOR_AVATAR_MIN_HEIGHT = 140;
+const TUTOR_AVATAR_SCROLL_RANGE = 280;
+let tutorAvatarResizeFrame = null;
+
+function updateTutorAvatarSize() {
+  const panel = document.getElementById("tutor-chat-panel");
+  if (panel.classList.contains("hidden")) return;
+
+  const messages = document.getElementById("tutor-chat-messages");
+  const avatar = document.getElementById("tutor-chat-avatar");
+  const distanceFromBottom = Math.max(
+    0,
+    messages.scrollHeight - messages.clientHeight - messages.scrollTop
+  );
+  const expandedHeight = Math.min(330, Math.max(190, panel.clientHeight * 0.58));
+  const collapseProgress = Math.min(1, distanceFromBottom / TUTOR_AVATAR_SCROLL_RANGE);
+  const targetHeight = expandedHeight - (expandedHeight - TUTOR_AVATAR_MIN_HEIGHT) * collapseProgress;
+  const currentHeight = Number.parseFloat(avatar.style.getPropertyValue("--tutor-avatar-height"));
+
+  if (Number.isFinite(currentHeight) && Math.abs(currentHeight - targetHeight) < 0.5) return;
+
+  avatar.style.setProperty("--tutor-avatar-height", `${targetHeight}px`);
+  const nextMaxScroll = Math.max(0, messages.scrollHeight - messages.clientHeight);
+  messages.scrollTop = Math.max(0, nextMaxScroll - distanceFromBottom);
+}
+
+function scheduleTutorAvatarSizeUpdate() {
+  if (tutorAvatarResizeFrame !== null) return;
+  tutorAvatarResizeFrame = requestAnimationFrame(() => {
+    tutorAvatarResizeFrame = null;
+    updateTutorAvatarSize();
+  });
+}
+
+function resetTutorAvatarSize() {
+  if (tutorAvatarResizeFrame !== null) {
+    cancelAnimationFrame(tutorAvatarResizeFrame);
+    tutorAvatarResizeFrame = null;
+  }
+  document.getElementById("tutor-chat-avatar").style.removeProperty("--tutor-avatar-height");
+}
+
+function appendTutorChatBubble(text, className) {
+  const messages = document.getElementById("tutor-chat-messages");
+  const bubble = document.createElement("div");
+  bubble.className = `tutor-chat-bubble ${className}`;
+  bubble.textContent = text;
+  messages.appendChild(bubble);
+  messages.scrollTop = messages.scrollHeight;
+  scheduleTutorAvatarSizeUpdate();
+  return bubble;
+}
+
+function setTutorConnectionStatus(message, isError = false, { retry = false } = {}) {
+  const messages = document.getElementById("tutor-chat-messages");
+  let status = messages.querySelector(".tutor-connection-status");
+  if (!message) {
+    status?.remove();
+    return;
+  }
+  if (!status) {
+    status = appendTutorChatBubble("", "tutor-chat-bubble-agent tutor-connection-status");
+  }
+  status.replaceChildren();
+  const label = document.createElement("span");
+  label.textContent = message;
+  status.appendChild(label);
+  if (retry) {
+    const retryButton = document.createElement("button");
+    retryButton.type = "button";
+    retryButton.className = "tutor-connection-retry";
+    retryButton.textContent = "Retry";
+    retryButton.addEventListener("click", retryTutorAvatarConnection);
+    status.appendChild(retryButton);
+  }
+  status.classList.toggle("tutor-chat-bubble-error", isError);
+}
+
+function retryTutorAvatarConnection() {
+  const panel = document.getElementById("tutor-chat-panel");
+  if (!lessonId || panel.classList.contains("hidden")) return;
+  setTutorConnectionStatus("Connecting avatar...");
+  TutorSession.disconnect();
+  ensureTutorSessionConnected().catch(() => {});
+}
+
+function ensureTutorSessionConnected() {
+  if (!lessonId) return Promise.resolve(null);
+  const connectingLessonId = lessonId;
+  const isConnected =
+    TutorSession.activeLessonId === connectingLessonId &&
+    TutorSession.sessionId &&
+    TutorSession.connectionReady &&
+    TutorSession.peerConnection?.connectionState === "connected";
+
+  if (isConnected) {
+    setTutorConnectionStatus("");
+    return Promise.resolve(TutorSession.sessionId);
+  }
+
+  setTutorConnectionStatus("Connecting avatar...");
+  return TutorSession.connect(connectingLessonId)
+    .then((sessionId) => {
+      const widget = document.getElementById("tutor-chat-widget");
+      if (!widget.classList.contains("hidden") && lessonId === connectingLessonId) {
+        setTutorConnectionStatus("");
+      }
+      return sessionId;
+    })
+    .catch((err) => {
+      console.error("[TutorSession] connect failed:", err);
+      const widget = document.getElementById("tutor-chat-widget");
+      if (!widget.classList.contains("hidden") && lessonId === connectingLessonId) {
+        setTutorConnectionStatus(
+          "Could not connect to the avatar service.",
+          true,
+          { retry: true }
+        );
+      }
+      throw err;
+    });
+}
+
+const TutorSTTConfig = {
+  websocketUrl: null,
+  loadingPromise: null,
+  error: null,
+};
+
+function validateTutorSTTWebSocketUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("The speech service URL is invalid.");
+  }
+  if (
+    !["ws:", "wss:"].includes(parsed.protocol)
+    || !parsed.hostname
+    || parsed.username
+    || parsed.password
+    || parsed.hash
+  ) {
+    throw new Error("The speech service URL is invalid.");
+  }
+  return parsed.href;
+}
+
+function loadTutorSTTConfig() {
+  if (TutorSTTConfig.websocketUrl) return Promise.resolve(TutorSTTConfig.websocketUrl);
+  if (TutorSTTConfig.loadingPromise) return TutorSTTConfig.loadingPromise;
+
+  TutorSTTConfig.loadingPromise = fetch("/api/stt/config", {
+    headers: { "Accept": "application/json" },
+    cache: "no-store",
+  })
+    .then(async (response) => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "Speech input is not configured.");
+      const websocketUrl = validateTutorSTTWebSocketUrl(data.websocket_url);
+      TutorSTTConfig.websocketUrl = websocketUrl;
+      TutorSTTConfig.error = null;
+      return websocketUrl;
+    })
+    .catch((err) => {
+      TutorSTTConfig.error = err;
+      throw err;
+    })
+    .finally(() => {
+      TutorSTTConfig.loadingPromise = null;
+    });
+  return TutorSTTConfig.loadingPromise;
+}
+
+function stopTutorActivity() {
+  TutorSession.cancelActiveMessage();
+  const interruptRequest = TutorSession.interruptSpeech(TutorSession.messageAttempt).catch((err) => {
+    console.debug("[TutorSession] interrupt unavailable:", err);
+    return false;
+  });
+  return interruptRequest;
+}
+
+function setTutorWidgetVisible(visible) {
+  const widget = document.getElementById("tutor-chat-widget");
+  const panel = document.getElementById("tutor-chat-panel");
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  widget.classList.toggle("hidden", !visible);
+  if (visible) {
+    loadTutorSTTConfig().catch((err) => {
+      console.debug("[TutorSTT] configuration unavailable:", err);
+    });
+    if (!panel.classList.contains("hidden")) prepareTutorSTTForGrantedPermission();
+    TutorSession._syncAudioMute();
+    ensureTutorSessionConnected().catch(() => {});
+    return;
+  }
+  closeTutorSTTStandby();
+  stopTutorMicrophone({ focusInput: false });
+  stopTutorActivity();
+  panel.classList.add("hidden");
+  videoEl.muted = true;
+  tutorPanelOpen = false;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  tutorAllowsNarration = false;
+  setTutorConnectionStatus("");
+  document.getElementById("tutor-chat-messages").replaceChildren();
+  document.getElementById("tutor-chat-input").value = "";
+  resetTutorAvatarSize();
+  TutorSession.clearConversation();
+  TutorSession.disconnect();
+}
+
+// ─── Chatbot toggle ───────────────────────────────────────────────────────────
+function setNarrationButtonPlaying(playing) {
+  const btn = document.getElementById("tts-narrate-btn");
+  if (!btn) return;
+  btn.textContent = playing ? "■" : "▶";
+  btn.classList.toggle("tts-btn-active", playing);
+}
+
+function isSlideshowVisible() {
+  const slideshow = document.getElementById("slideshow");
+  return Boolean(slideshow && !slideshow.classList.contains("hidden"));
+}
+
+function toggleNarrationFromControl(text, btn) {
+  if (tutorRecordingShellActive) stopTutorMicrophone({ focusInput: false });
+  if (tutorPanelOpen) {
+    const isPlaying = Boolean(currentAudio && !currentAudio.paused && !audioPaused);
+    tutorAllowsNarration = !isPlaying;
+    tutorPausedNarration = false;
+    tutorDeferredNarration = false;
+  }
+  return speakNotes(text, btn);
+}
+
+function pauseNarrationForTutor() {
+  tutorPanelOpen = true;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  tutorAllowsNarration = false;
+  if (!currentAudio) {
+    const btn = document.getElementById("tts-narrate-btn");
+    const notes = slides[current]?.speaker_notes;
+    const narrationPending = Boolean(autoPlayTimer || btn?.classList.contains("tts-btn-active"));
+    if (notes && btn && narrationPending) {
+      if (autoPlayTimer) {
+        clearTimeout(autoPlayTimer);
+        autoPlayTimer = null;
+      }
+      ttsRequestId++;
+      tutorDeferredNarration = true;
+      setNarrationButtonPlaying(false);
+      btn.disabled = false;
+      btn.onclick = () => toggleNarrationFromControl(notes, btn);
+    }
+    return;
+  }
+  if (currentAudio.paused) return;
+
+  currentAudio.pause();
+  audioPaused = true;
+  tutorPausedNarration = true;
+  setNarrationButtonPlaying(false);
+}
+
+function resumeNarrationAfterTutor() {
+  tutorPanelOpen = false;
+  const shouldResume = tutorPausedNarration;
+  const shouldStart = tutorDeferredNarration;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  tutorAllowsNarration = false;
+
+  if (!isSlideshowVisible()) {
+    setNarrationButtonPlaying(false);
+    return;
+  }
+
+  if (shouldResume && currentAudio && audioPaused) {
+    const audioToResume = currentAudio;
+    audioPaused = false;
+    setNarrationButtonPlaying(true);
+    audioToResume.play().catch((err) => {
+      if (currentAudio !== audioToResume) return;
+      audioPaused = true;
+      setNarrationButtonPlaying(false);
+      console.debug("Lesson narration resume deferred:", err);
+    });
+    return;
+  }
+
+  if (shouldStart && !currentAudio) {
+    const notes = slides[current]?.speaker_notes;
+    const btn = document.getElementById("tts-narrate-btn");
+    if (notes && btn) speakNotes(notes, btn);
+  }
+}
+
+function toggleTutorChat() {
+  const panel = document.getElementById("tutor-chat-panel");
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  const wasHidden = panel.classList.contains("hidden");
+  if (!wasHidden) {
+    stopTutorMicrophone({ focusInput: false });
+    stopTutorActivity();
+    TutorSession.cancelRecovery();
+    closeTutorSTTStandby();
+    panel.classList.add("hidden");
+    videoEl.muted = true;
+    resumeNarrationAfterTutor();
+    return;
+  }
+  panel.classList.remove("hidden");
+  pauseNarrationForTutor();
+  TutorSession._syncAudioMute();
+  videoEl.play().catch((err) => console.debug("Tutor avatar playback deferred:", err));
+  scheduleTutorAvatarSizeUpdate();
+  prepareTutorSTTForGrantedPermission();
+  ensureTutorSessionConnected().catch(() => {});
+}
+
+let tutorRecordingShellActive = false;
+let tutorMicrophoneAttemptId = 0;
+let tutorMicrophoneStream = null;
+let tutorMicrophoneContext = null;
+let tutorMicrophoneSource = null;
+let tutorMicrophoneAnalyser = null;
+let tutorMicrophoneLevelFrame = null;
+let tutorSTTSession = null;
+let tutorSTTStandbyTransport = null;
+let tutorSTTPrewarmTimer = null;
+let tutorMicrophonePermissionGranted = false;
+let tutorAvatarVisualInterruptId = 0;
+let tutorAvatarVisualInterruptTimer = null;
+
+const TUTOR_STT_WORKLET_URL = "/tutor-stt-worklet.js";
+const TUTOR_STT_MAX_BUFFERED_BYTES = 1024 * 1024;
+const TUTOR_STT_AUTO_SUBMIT_DELAY_MS = 600;
+const TUTOR_STT_MAX_RECORDING_MS = 60 * 1000;
+const TUTOR_STT_MAX_TRANSCRIPT_LENGTH = 2000;
+const TUTOR_STT_GUARD_INTERVAL_MS = 1000;
+const TUTOR_STT_SLEEP_GAP_MS = 10 * 1000;
+const TUTOR_STT_PREWARM_DELAY_MS = 250;
+
+function setTutorRecordingShell(
+  active,
+  { focusInput = true, state = "recording", preserveInput = false } = {}
+) {
+  const wasActive = tutorRecordingShellActive;
+  tutorRecordingShellActive = active;
+  const shell = document.getElementById("tutor-chat-input-shell");
+  const input = document.getElementById("tutor-chat-input");
+  const micButton = document.getElementById("tutor-chat-mic");
+  const recordingStatus = document.getElementById("tutor-chat-recording-status");
+  const recordingLabel = document.getElementById("tutor-chat-recording-label");
+  const sendButton = document.getElementById("tutor-chat-send");
+
+  shell.classList.toggle("is-recording", active);
+  shell.classList.toggle("is-requesting", active && state === "requesting");
+  if (active && !wasActive) input.value = "";
+  if (!active && wasActive && !preserveInput) input.value = "";
+  input.readOnly = active;
+  input.placeholder = active
+    ? (state === "requesting" ? "Starting microphone..." : "Listening...")
+    : "Ask a question...";
+  micButton.setAttribute("aria-pressed", String(active));
+  micButton.setAttribute("aria-label", active ? "Discard voice input" : "Start voice input");
+  micButton.title = active ? "Discard voice input" : "Start voice input";
+  recordingStatus.setAttribute("aria-hidden", String(!active));
+  recordingLabel.textContent = state === "requesting" ? "Starting microphone..." : "Listening...";
+  sendButton.disabled = active;
+
+  if (!active && focusInput) input.focus();
+}
+
+function pauseSlideNarrationForMicrophone() {
+  if (autoPlayTimer) {
+    clearTimeout(autoPlayTimer);
+    autoPlayTimer = null;
+  }
+  ttsRequestId++;
+
+  if (currentAudio && !currentAudio.paused) currentAudio.pause();
+  if (currentAudio) audioPaused = true;
+
+  tutorAllowsNarration = false;
+  tutorPausedNarration = false;
+  tutorDeferredNarration = false;
+  setNarrationButtonPlaying(false);
+
+  const btn = document.getElementById("tts-narrate-btn");
+  const notes = slides[current]?.speaker_notes;
+  if (btn && notes) {
+    btn.disabled = false;
+    btn.onclick = () => toggleNarrationFromControl(notes, btn);
+  }
+}
+
+function stopPronunciationForMicrophone() {
+  pronounceRequestId++;
+  if (pronounceAudio) {
+    pronounceAudio.pause();
+    pronounceAudio = null;
+  }
+  document.querySelectorAll(".info-pronounce-btn.tts-speaking")
+    .forEach((btn) => btn.classList.remove("tts-speaking"));
+}
+
+function stopTutorAudioForMicrophone() {
+  freezeTutorAvatarUntilIdle();
+  pauseSlideNarrationForMicrophone();
+  stopPronunciationForMicrophone();
+  stopTutorActivity().catch((err) => {
+    console.debug("[TutorMicrophone] tutor interrupt unavailable:", err);
+  });
+}
+
+function updateTutorMicrophoneLevel() {
+  if (!tutorMicrophoneAnalyser || !tutorRecordingShellActive) return;
+
+  const samples = new Float32Array(tutorMicrophoneAnalyser.fftSize);
+  const meter = document.querySelector(".tutor-recording-level");
+  const drawLevel = () => {
+    if (!tutorMicrophoneAnalyser || !tutorRecordingShellActive) return;
+    tutorMicrophoneAnalyser.getFloatTimeDomainData(samples);
+    let sumSquares = 0;
+    for (const sample of samples) sumSquares += sample * sample;
+    const level = Math.min(1, Math.sqrt(sumSquares / samples.length) * 6);
+    meter.style.setProperty("--tutor-mic-level", `${Math.max(4, level * 100)}%`);
+    tutorMicrophoneLevelFrame = requestAnimationFrame(drawLevel);
+  };
+  drawLevel();
+}
+
+function joinTutorTranscript(left, right) {
+  return [left, right]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function limitTutorTranscript(transcript) {
+  return String(transcript || "")
+    .slice(0, TUTOR_STT_MAX_TRANSCRIPT_LENGTH)
+    .trim();
+}
+
+function updateTutorSTTTranscript(session) {
+  if (tutorSTTSession !== session || !tutorRecordingShellActive) return;
+  const input = document.getElementById("tutor-chat-input");
+  const label = document.getElementById("tutor-chat-recording-label");
+  const transcript = joinTutorTranscript(session.finalTranscript, session.interimTranscript);
+  input.value = transcript;
+  input.setSelectionRange(input.value.length, input.value.length);
+  input.scrollLeft = input.scrollWidth;
+  label.textContent = transcript ? `Transcription: ${transcript}` : "Listening...";
+}
+
+function cancelTutorSTTAutoSubmit(session) {
+  if (session.autoSubmitTimer === null) return;
+  clearTimeout(session.autoSubmitTimer);
+  session.autoSubmitTimer = null;
+  updateTutorSTTTranscript(session);
+}
+
+function submitTutorSTTTranscript(session) {
+  if (
+    tutorSTTSession !== session
+    || session.stopping
+    || session.submitting
+    || !tutorRecordingShellActive
+  ) return;
+
+  session.autoSubmitTimer = null;
+  const transcript = limitTutorTranscript(
+    joinTutorTranscript(session.finalTranscript, session.interimTranscript)
+  );
+  if (!transcript) {
+    updateTutorSTTTranscript(session);
+    return;
+  }
+
+  session.submitting = true;
+  stopTutorMicrophone({ focusInput: false, preserveTranscript: true });
+  const input = document.getElementById("tutor-chat-input");
+  input.value = transcript;
+  sendTutorChatMessage();
+}
+
+function finishTutorSTTAtLimit(session, message) {
+  if (tutorSTTSession !== session || session.stopping || session.submitting) return;
+  const transcript = limitTutorTranscript(
+    joinTutorTranscript(session.finalTranscript, session.interimTranscript)
+  );
+  if (!transcript) {
+    stopTutorMicrophone();
+    showToast(message);
+    return;
+  }
+
+  session.finalTranscript = transcript;
+  session.interimTranscript = "";
+  updateTutorSTTTranscript(session);
+  showToast(`${message} Sending the current transcript.`);
+  submitTutorSTTTranscript(session);
+}
+
+function startTutorSTTGuards(session) {
+  session.startedAt = Date.now();
+  session.lastGuardAt = session.startedAt;
+  session.guardTimer = setInterval(() => {
+    if (tutorSTTSession !== session || session.stopping) return;
+    const now = Date.now();
+    const gap = now - session.lastGuardAt;
+    session.lastGuardAt = now;
+
+    if (gap > TUTOR_STT_SLEEP_GAP_MS) {
+      stopTutorMicrophone({ focusInput: false });
+      showToast("Voice input was cancelled after the device resumed.");
+      return;
+    }
+    if (now - session.startedAt >= TUTOR_STT_MAX_RECORDING_MS) {
+      finishTutorSTTAtLimit(session, "Voice input reached the 60-second limit.");
+    }
+  }, TUTOR_STT_GUARD_INTERVAL_MS);
+}
+
+function scheduleTutorSTTAutoSubmit(session) {
+  const transcript = joinTutorTranscript(session.finalTranscript, session.interimTranscript);
+  if (!transcript || session.submitting) return;
+  cancelTutorSTTAutoSubmit(session);
+  document.getElementById("tutor-chat-recording-label").textContent =
+    `Sending transcription: ${transcript}`;
+  session.autoSubmitTimer = setTimeout(
+    () => submitTutorSTTTranscript(session),
+    TUTOR_STT_AUTO_SUBMIT_DELAY_MS
+  );
+}
+
+function failTutorSTTSession(session, message) {
+  if (tutorSTTSession !== session || session.stopping) return;
+  console.error("[TutorSTT] session failed:", message);
+  stopTutorMicrophone({ prepareNext: false });
+  showToast(message);
+}
+
+function handleTutorSTTMessage(session, event) {
+  if (tutorSTTSession !== session || session.stopping) return;
+
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch (err) {
+    console.debug("[TutorSTT] ignored non-JSON message:", err);
+    return;
+  }
+
+  if (message.type === "Error") {
+    failTutorSTTSession(
+      session,
+      message.description || message.message || "The speech service reported an error."
+    );
+    return;
+  }
+  if (message.type === "SpeechStarted") {
+    cancelTutorSTTAutoSubmit(session);
+    return;
+  }
+  if (message.type !== "Results") return;
+
+  const transcript = message.channel?.alternatives?.[0]?.transcript?.trim() || "";
+  if (transcript && !message.speech_final) cancelTutorSTTAutoSubmit(session);
+  if (message.is_final) {
+    const resultKey = Number.isFinite(message.start) && Number.isFinite(message.duration)
+      ? `${message.start}:${message.duration}`
+      : null;
+    if (transcript && (!resultKey || !session.finalResultKeys.has(resultKey))) {
+      session.finalTranscript = joinTutorTranscript(session.finalTranscript, transcript);
+      if (resultKey) session.finalResultKeys.add(resultKey);
+    }
+    session.interimTranscript = "";
+  } else {
+    session.interimTranscript = transcript;
+  }
+  updateTutorSTTTranscript(session);
+  const completeTranscript = joinTutorTranscript(
+    session.finalTranscript,
+    session.interimTranscript
+  );
+  if (completeTranscript.length >= TUTOR_STT_MAX_TRANSCRIPT_LENGTH) {
+    session.finalTranscript = limitTutorTranscript(completeTranscript);
+    session.interimTranscript = "";
+    updateTutorSTTTranscript(session);
+    finishTutorSTTAtLimit(session, "Voice input reached the 2,000-character limit.");
+    return;
+  }
+  if (message.speech_final) scheduleTutorSTTAutoSubmit(session);
+}
+
+function createTutorSTTTransport(websocketUrl) {
+  const socket = new WebSocket(websocketUrl);
+  const transport = {
+    websocketUrl,
+    socket,
+    opened: false,
+    ready: null,
+  };
+  transport.ready = new Promise((resolve, reject) => {
+    socket.addEventListener("open", () => {
+      transport.opened = true;
+      resolve();
+    }, { once: true });
+    socket.addEventListener("error", () => {
+      if (!transport.opened) reject(new Error("Could not connect to the speech service."));
+    }, { once: true });
+    socket.addEventListener("close", () => {
+      if (!transport.opened) reject(new Error("The speech service closed the connection."));
+    }, { once: true });
+  });
+  return transport;
+}
+
+function closeTutorSTTStandby() {
+  if (tutorSTTPrewarmTimer !== null) {
+    clearTimeout(tutorSTTPrewarmTimer);
+    tutorSTTPrewarmTimer = null;
+  }
+  const transport = tutorSTTStandbyTransport;
+  tutorSTTStandbyTransport = null;
+  if (!transport || transport.socket.readyState >= WebSocket.CLOSING) return;
+  try { transport.socket.close(1000, "Standby speech input closed"); } catch {}
+}
+
+function canPrewarmTutorSTT() {
+  const widget = document.getElementById("tutor-chat-widget");
+  const panel = document.getElementById("tutor-chat-panel");
+  return Boolean(
+    tutorMicrophonePermissionGranted &&
+    !document.hidden &&
+    widget &&
+    !widget.classList.contains("hidden") &&
+    panel &&
+    !panel.classList.contains("hidden") &&
+    !tutorSTTSession
+  );
+}
+
+async function prewarmTutorSTTConnection() {
+  if (!canPrewarmTutorSTT()) return null;
+  const websocketUrl = await loadTutorSTTConfig();
+  if (!canPrewarmTutorSTT()) return null;
+
+  const current = tutorSTTStandbyTransport;
+  if (
+    current &&
+    current.websocketUrl === websocketUrl &&
+    current.socket.readyState < WebSocket.CLOSING
+  ) {
+    await current.ready;
+    return current;
+  }
+
+  closeTutorSTTStandby();
+  const transport = createTutorSTTTransport(websocketUrl);
+  tutorSTTStandbyTransport = transport;
+  try {
+    await transport.ready;
+    if (tutorSTTStandbyTransport !== transport || !canPrewarmTutorSTT()) {
+      if (tutorSTTStandbyTransport === transport) closeTutorSTTStandby();
+      return null;
+    }
+    return transport;
+  } catch (err) {
+    if (tutorSTTStandbyTransport === transport) tutorSTTStandbyTransport = null;
+    try { transport.socket.close(); } catch {}
+    throw err;
+  }
+}
+
+function scheduleTutorSTTPrewarm(delay = TUTOR_STT_PREWARM_DELAY_MS) {
+  if (!canPrewarmTutorSTT()) return;
+  if (tutorSTTPrewarmTimer !== null) clearTimeout(tutorSTTPrewarmTimer);
+  tutorSTTPrewarmTimer = setTimeout(() => {
+    tutorSTTPrewarmTimer = null;
+    prewarmTutorSTTConnection().catch((err) => {
+      console.debug("[TutorSTT] standby connection unavailable:", err);
+    });
+  }, delay);
+}
+
+async function prepareTutorSTTForGrantedPermission() {
+  if (tutorMicrophonePermissionGranted) {
+    scheduleTutorSTTPrewarm(0);
+    return;
+  }
+  if (!navigator.permissions?.query) return;
+  try {
+    const permission = await navigator.permissions.query({ name: "microphone" });
+    if (permission.state !== "granted") return;
+    tutorMicrophonePermissionGranted = true;
+    scheduleTutorSTTPrewarm(0);
+  } catch (err) {
+    console.debug("[TutorSTT] microphone permission state unavailable:", err);
+  }
+}
+
+function takeTutorSTTTransport(websocketUrl) {
+  const standby = tutorSTTStandbyTransport;
+  tutorSTTStandbyTransport = null;
+  if (
+    standby &&
+    standby.websocketUrl === websocketUrl &&
+    standby.socket.readyState < WebSocket.CLOSING
+  ) {
+    return standby;
+  }
+  if (standby && standby.socket.readyState < WebSocket.CLOSING) {
+    try { standby.socket.close(1000, "Standby speech input replaced"); } catch {}
+  }
+  return createTutorSTTTransport(websocketUrl);
+}
+
+function openTutorSTTSession(websocketUrl, attemptId) {
+  if (tutorSTTPrewarmTimer !== null) {
+    clearTimeout(tutorSTTPrewarmTimer);
+    tutorSTTPrewarmTimer = null;
+  }
+  const transport = takeTutorSTTTransport(websocketUrl);
+  const socket = transport.socket;
+  const session = {
+    attemptId,
+    socket,
+    workletNode: null,
+    silentGain: null,
+    finalTranscript: "",
+    interimTranscript: "",
+    finalResultKeys: new Set(),
+    autoSubmitTimer: null,
+    guardTimer: null,
+    startedAt: null,
+    lastGuardAt: null,
+    submitting: false,
+    opened: transport.opened,
+    stopping: false,
+  };
+  tutorSTTSession = session;
+
+  socket.addEventListener("message", (event) => handleTutorSTTMessage(session, event));
+  socket.addEventListener("close", () => {
+    if (tutorSTTSession !== session || session.stopping) return;
+    failTutorSTTSession(session, "The speech service disconnected. Please try again.");
+  });
+
+  const opened = transport.ready.then(() => {
+    session.opened = true;
+  });
+
+  return { session, opened };
+}
+
+async function attachTutorSTTAudio(session) {
+  if (!tutorMicrophoneContext?.audioWorklet) {
+    throw new Error("AudioWorklet is not supported in this browser.");
+  }
+  await tutorMicrophoneContext.audioWorklet.addModule(TUTOR_STT_WORKLET_URL);
+  if (tutorSTTSession !== session || session.stopping) return;
+
+  const workletNode = new AudioWorkletNode(
+    tutorMicrophoneContext,
+    "tutor-stt-pcm-capture",
+    {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      processorOptions: { outputSampleRate: 16000 },
+    }
+  );
+  const silentGain = tutorMicrophoneContext.createGain();
+  silentGain.gain.value = 0;
+  workletNode.port.onmessage = (event) => {
+    if (
+      tutorSTTSession !== session
+      || session.stopping
+      || event.data?.type !== "audio"
+      || session.socket.readyState !== WebSocket.OPEN
+    ) return;
+    if (session.socket.bufferedAmount > TUTOR_STT_MAX_BUFFERED_BYTES) {
+      failTutorSTTSession(session, "The speech service cannot keep up with the microphone stream.");
+      return;
+    }
+    session.socket.send(event.data.buffer);
+  };
+
+  tutorMicrophoneSource.connect(workletNode);
+  workletNode.connect(silentGain);
+  silentGain.connect(tutorMicrophoneContext.destination);
+  session.workletNode = workletNode;
+  session.silentGain = silentGain;
+}
+
+function resumeTutorAvatarAfterInterrupt({ play = true } = {}) {
+  tutorAvatarVisualInterruptId++;
+  if (tutorAvatarVisualInterruptTimer !== null) {
+    clearTimeout(tutorAvatarVisualInterruptTimer);
+    tutorAvatarVisualInterruptTimer = null;
+  }
+
+  const avatar = document.getElementById("tutor-chat-avatar");
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  avatar?.removeAttribute("data-visually-interrupted");
+  if (!play || !videoEl || document.getElementById("tutor-chat-panel")?.classList.contains("hidden")) return;
+  videoEl.play().catch((err) => console.debug("Tutor avatar playback resume deferred:", err));
+}
+
+function freezeTutorAvatarUntilIdle() {
+  if (!["preparing", "speaking"].includes(TutorSession.speechState)) return;
+
+  const videoEl = document.getElementById("tutor-chat-avatar-video");
+  const avatar = document.getElementById("tutor-chat-avatar");
+  if (!videoEl || !avatar) return;
+
+  const interruptId = ++tutorAvatarVisualInterruptId;
+  const startedAt = Date.now();
+  let idleChecks = 0;
+  if (tutorAvatarVisualInterruptTimer !== null) clearTimeout(tutorAvatarVisualInterruptTimer);
+  avatar.dataset.visuallyInterrupted = "true";
+  videoEl.pause();
+
+  const waitForIdle = async () => {
+    if (interruptId !== tutorAvatarVisualInterruptId) return;
+    try {
+      const speaking = await TutorSession._getSpeakingState();
+      if (interruptId !== tutorAvatarVisualInterruptId) return;
+      if (!speaking) {
+        idleChecks++;
+        if (idleChecks >= TUTOR_SPEAKING_IDLE_CONFIRMATIONS) {
+          resumeTutorAvatarAfterInterrupt();
+          return;
+        }
+      } else {
+        idleChecks = 0;
+      }
+    } catch (err) {
+      console.debug("[TutorMicrophone] avatar idle status unavailable:", err);
+    }
+
+    if (Date.now() - startedAt >= 6000) {
+      resumeTutorAvatarAfterInterrupt();
+      return;
+    }
+    tutorAvatarVisualInterruptTimer = setTimeout(waitForIdle, TUTOR_SPEAKING_POLL_INTERVAL_MS);
+  };
+  tutorAvatarVisualInterruptTimer = setTimeout(waitForIdle, TUTOR_SPEAKING_POLL_INTERVAL_MS);
+}
+
+function releaseTutorMicrophoneResources() {
+  if (tutorMicrophoneLevelFrame !== null) {
+    cancelAnimationFrame(tutorMicrophoneLevelFrame);
+    tutorMicrophoneLevelFrame = null;
+  }
+  const source = tutorMicrophoneSource;
+  const analyser = tutorMicrophoneAnalyser;
+  const stream = tutorMicrophoneStream;
+  const context = tutorMicrophoneContext;
+  const sttSession = tutorSTTSession;
+  tutorMicrophoneStream = null;
+  tutorMicrophoneContext = null;
+  tutorMicrophoneSource = null;
+  tutorMicrophoneAnalyser = null;
+  tutorSTTSession = null;
+
+  if (sttSession) {
+    sttSession.stopping = true;
+    if (sttSession.autoSubmitTimer !== null) clearTimeout(sttSession.autoSubmitTimer);
+    if (sttSession.guardTimer !== null) clearInterval(sttSession.guardTimer);
+    sttSession.workletNode?.port.close();
+    try { sttSession.workletNode?.disconnect(); } catch {}
+    try { sttSession.silentGain?.disconnect(); } catch {}
+    try { sttSession.socket.close(1000, "Voice input stopped"); } catch {}
+  }
+
+  try { source?.disconnect(); } catch {}
+  try { analyser?.disconnect(); } catch {}
+  stream?.getTracks().forEach((track) => {
+    try { track.stop(); } catch {}
+  });
+  context?.close().catch(() => {});
+  document.querySelector(".tutor-recording-level")?.style.removeProperty("--tutor-mic-level");
+  const recordingLabel = document.getElementById("tutor-chat-recording-label");
+  recordingLabel.textContent = "Listening...";
+}
+
+function stopTutorMicrophone(
+  { focusInput = true, preserveTranscript = false, prepareNext = true } = {}
+) {
+  tutorMicrophoneAttemptId++;
+  releaseTutorMicrophoneResources();
+  setTutorRecordingShell(false, { focusInput, preserveInput: preserveTranscript });
+  if (prepareNext) scheduleTutorSTTPrewarm();
+}
+
+function microphoneErrorMessage(err) {
+  if (err?.name === "NotAllowedError" || err?.name === "SecurityError") {
+    return "Microphone access was blocked. Allow microphone access and try again.";
+  }
+  if (err?.name === "NotFoundError") return "No microphone was found.";
+  if (err?.name === "NotReadableError") return "The microphone is already in use by another application.";
+  return "Could not start the microphone. Please try again.";
+}
+
+async function startTutorMicrophone() {
+  if (tutorRecordingShellActive) return;
+
+  const attemptId = ++tutorMicrophoneAttemptId;
+  stopTutorAudioForMicrophone();
+  setTutorRecordingShell(true, { focusInput: false, state: "requesting" });
+
+  try {
+    await loadTutorSTTConfig();
+  } catch (err) {
+    if (attemptId !== tutorMicrophoneAttemptId) return;
+    stopTutorMicrophone();
+    showToast(`Speech input is unavailable. ${err.message}`);
+    return;
+  }
+  if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) return;
+
+  if (!navigator.mediaDevices?.getUserMedia) {
+    stopTutorMicrophone();
+    showToast("Microphone access is not supported in this browser.");
+    return;
+  }
+
+  try {
+    const { session, opened } = openTutorSTTSession(TutorSTTConfig.websocketUrl, attemptId);
+    opened.catch(() => {});
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+    tutorMicrophonePermissionGranted = true;
+
+    if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      stream.getTracks().forEach((track) => track.stop());
+      throw new Error("Web Audio is not supported.");
+    }
+
+    tutorMicrophoneStream = stream;
+    tutorMicrophoneContext = new AudioContextClass();
+    tutorMicrophoneSource = tutorMicrophoneContext.createMediaStreamSource(stream);
+    tutorMicrophoneAnalyser = tutorMicrophoneContext.createAnalyser();
+    tutorMicrophoneAnalyser.fftSize = 512;
+    tutorMicrophoneAnalyser.smoothingTimeConstant = 0.7;
+    tutorMicrophoneSource.connect(tutorMicrophoneAnalyser);
+    await tutorMicrophoneContext.resume();
+
+    if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) return;
+
+    await Promise.all([opened, attachTutorSTTAudio(session)]);
+    if (
+      attemptId !== tutorMicrophoneAttemptId
+      || !tutorRecordingShellActive
+      || tutorSTTSession !== session
+    ) return;
+
+    stream.getAudioTracks().forEach((track) => {
+      track.addEventListener("ended", () => {
+        if (tutorMicrophoneStream !== stream) return;
+        stopTutorMicrophone();
+        showToast("The microphone disconnected.");
+      }, { once: true });
+    });
+    setTutorRecordingShell(true, { focusInput: false, state: "recording" });
+    updateTutorSTTTranscript(session);
+    startTutorSTTGuards(session);
+    updateTutorMicrophoneLevel();
+  } catch (err) {
+    if (attemptId !== tutorMicrophoneAttemptId) return;
+    console.error("[TutorMicrophone] start failed:", err);
+    stopTutorMicrophone({ prepareNext: false });
+    const message = err?.message?.includes("speech service") || err?.message?.includes("AudioWorklet")
+      ? err.message
+      : microphoneErrorMessage(err);
+    showToast(message);
+  }
+}
+
+function toggleTutorMicrophone() {
+  if (tutorRecordingShellActive) {
+    stopTutorMicrophone();
+    return;
+  }
+  startTutorMicrophone();
+}
+
+async function sendTutorChatMessage() {
+  if (tutorRecordingShellActive) return;
+  const input = document.getElementById("tutor-chat-input");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  const attempt = TutorSession.beginMessageAttempt();
+  const interruptRequest = TutorSession.interruptSpeech(attempt.id, { preserveState: true }).catch((err) => {
+    console.debug("[TutorSession] immediate interrupt unavailable:", err);
+    return false;
+  });
+  appendTutorChatBubble(text, "tutor-chat-bubble-user");
+  const pendingReply = appendTutorChatBubble("Thinking...", "tutor-chat-bubble-agent");
+  TutorSession.registerPendingReply(attempt.id, pendingReply);
+  const avatarReady = ensureTutorSessionConnected().then(
+    () => null,
+    (error) => error
+  );
+  let replyGenerated = false;
+  try {
+    const reply = await TutorSession.sendMessage(text, attempt);
+    replyGenerated = true;
+    TutorSession.resolvePendingReply(attempt.id);
+    pendingReply.textContent = reply;
+    scheduleTutorAvatarSizeUpdate();
+
+    const connectionError = await avatarReady;
+    if (connectionError) throw connectionError;
+    if (!TutorSession.isCurrentMessageAttempt(attempt.id)) {
+      throw new DOMException("Tutor response was superseded.", "AbortError");
+    }
+    await interruptRequest;
+    await TutorSession.speakMessage(reply, attempt);
+  } catch (err) {
+    const superseded = err?.name === "AbortError" || !TutorSession.isCurrentMessageAttempt(attempt.id);
+    if (superseded) return;
+    console.error("[TutorSession] message send failed:", err);
+    TutorSession.resolvePendingReply(attempt.id);
+    TutorSession._stopSpeakingMonitor();
+    TutorSession._setSpeechState("idle");
+    if (replyGenerated) {
+      appendTutorChatBubble(
+        "The response was generated, but speech failed. Check the TTS service and LiveTalking.",
+        "tutor-chat-bubble-agent tutor-chat-bubble-error"
+      );
+    } else {
+      pendingReply.textContent = "I couldn't generate a tutor response. Please try again.";
+      pendingReply.classList.add("tutor-chat-bubble-error");
+    }
+  } finally {
+    TutorSession.finishMessageAttempt(attempt.id, attempt.controller);
+    const panel = document.getElementById("tutor-chat-panel");
+    if (TutorSession.isCurrentMessageAttempt(attempt.id) && !panel.classList.contains("hidden")) {
+      input.focus();
+    }
+  }
+}
+
+document.getElementById("tutor-chat-toggle").addEventListener("click", toggleTutorChat);
+document.getElementById("tutor-chat-close").addEventListener("click", toggleTutorChat);
+document.getElementById("tutor-chat-send").addEventListener("click", sendTutorChatMessage);
+document.getElementById("tutor-chat-mic").addEventListener("click", toggleTutorMicrophone);
+document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendTutorChatMessage();
+});
+document.getElementById("tutor-chat-messages").addEventListener("scroll", scheduleTutorAvatarSizeUpdate);
+window.addEventListener("resize", scheduleTutorAvatarSizeUpdate);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    closeTutorSTTStandby();
+    if (tutorRecordingShellActive) stopTutorMicrophone({ focusInput: false });
+    return;
+  }
+  prepareTutorSTTForGrantedPermission();
+});
+window.addEventListener("pagehide", () => {
+  closeTutorSTTStandby();
+  stopTutorMicrophone({ focusInput: false, prepareNext: false });
+  stopTutorActivity();
+  TutorSession.disconnect();
+});
 
 // ─── Animations ───────────────────────────────────────────────────────────────
 /*
@@ -2458,6 +4204,8 @@ function navigate(dir) {
 }
 
 function handleKeyboard(e) {
+  const tag = document.activeElement.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || document.activeElement.isContentEditable) return;
   if (e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === " ") navigate(1);
   if (e.key === "ArrowLeft" || e.key === "ArrowUp") navigate(-1);
 }
@@ -2580,10 +4328,16 @@ function cancelAutoPlay(notes, btn) {
   // Invalidate any in-flight fetch
   ttsRequestId++;
 
+  if (tutorPanelOpen) {
+    tutorAllowsNarration = false;
+    tutorPausedNarration = false;
+    tutorDeferredNarration = false;
+  }
+
   // Reset button to paused state — clicking again resumes/plays
   btn.textContent = "▶";
   btn.classList.remove("tts-btn-active");
-  btn.onclick = () => speakNotes(notes, btn);
+  btn.onclick = () => toggleNarrationFromControl(notes, btn);
 }
 
 function cacheGet(key) {
@@ -2621,6 +4375,11 @@ async function prefetchTTS(text) {
 }
 
 async function speakNotes(text, btn) {
+  if (!isSlideshowVisible()) {
+    setNarrationButtonPlaying(false);
+    return;
+  }
+
   // if playing → pause
   if (currentAudio && !audioPaused) {
     currentAudio.pause();
@@ -2643,7 +4402,7 @@ async function speakNotes(text, btn) {
   const cachedUrl = cacheGet(text);
   if (cachedUrl) {
     // Restore normal toggle behavior now that we're actually playing
-    btn.onclick = () => speakNotes(text, btn);
+    btn.onclick = () => toggleNarrationFromControl(text, btn);
     startAudio(cachedUrl, text, btn);
     return;
   }
@@ -2666,7 +4425,7 @@ async function speakNotes(text, btn) {
     cacheSet(text, url);      // ← cache it before first play
 
     if (requestId !== ttsRequestId) return;   // slide changed mid-load; still cached, just don't play it
-    btn.onclick = () => speakNotes(text, btn);
+    btn.onclick = () => toggleNarrationFromControl(text, btn);
     startAudio(url, text, btn);
   } catch (err) {
     if (requestId !== ttsRequestId) return;    // don't touch a button that now belongs to a different slide
@@ -2701,7 +4460,13 @@ function startAudio(url, text, btn) {
   currentAudio.addEventListener("play", startHighlightLoop);
   currentAudio.addEventListener("pause", stopHighlightLoop);
 
-  currentAudio.onended = () => finishNarration(btn);
+  const narratedAudio = currentAudio;
+  const narratedSlideIndex = current;
+  currentAudio.onended = () => {
+    if (currentAudio !== narratedAudio || current !== narratedSlideIndex) return;
+    finishNarration(btn);
+    if (current < slides.length - 1) navigate(1);
+  };
 
   btn.textContent = "■";
   btn.classList.add("tts-btn-active");
@@ -2729,6 +4494,7 @@ function stopNarrationFully() {
     currentAudio = null;
   }
   audioPaused = false;
+  tutorAllowsNarration = false;
   if (autoPlayTimer) {
     clearTimeout(autoPlayTimer);
     autoPlayTimer = null;
@@ -2855,6 +4621,11 @@ function setNotesVisible(visible) {
   panel.classList.toggle("hidden", !visible);
   btn.classList.toggle("notes-active", visible);
 
+  scaler.style.transform = "";
+  scaler.style.marginBottom = "";
+
+  if (!isSlideshowVisible()) return;
+
   if (visible) {
     const stageH    = stage.getBoundingClientRect().height;
     const stageW    = stage.getBoundingClientRect().width - 48;
@@ -2867,12 +4638,12 @@ function setNotesVisible(visible) {
     const scaleByW    = stageW / slideW;
     const scale       = Math.min(baseScale, scaleByH, scaleByW);
 
+    if (!Number.isFinite(scale) || scale <= 0) return;
+
     scaler.style.transform       = `scale(${scale})`;
     scaler.style.transformOrigin = "top center";
     scaler.style.marginBottom    = `${-(slideH * (1 - scale))}px`;
   } else {
-    scaler.style.transform    = "";
-    scaler.style.marginBottom = "";
     fitSlideToStage();   // restore the window-fit scale
   }
 }
@@ -3056,6 +4827,8 @@ function renderDefinitionCard(data) {
 }
 
 async function pronounceTerm(text, btn) {
+  if (tutorRecordingShellActive) stopTutorMicrophone({ focusInput: false });
+  const requestId = ++pronounceRequestId;
   if (pronounceAudio) {
     pronounceAudio.pause();
     pronounceAudio = null;
@@ -3068,7 +4841,7 @@ async function pronounceTerm(text, btn) {
     // Move to most-recent end (LRU touch)
     pronounceCache.delete(text);
     pronounceCache.set(text, cached);
-    playPronunciation(cached, btn);
+    if (requestId === pronounceRequestId) playPronunciation(cached, btn);
     return;
   }
 
@@ -3092,7 +4865,7 @@ async function pronounceTerm(text, btn) {
       pronounceCache.delete(oldestKey);
     }
 
-    playPronunciation(url, btn);
+    if (requestId === pronounceRequestId) playPronunciation(url, btn);
   } catch (err) {
     console.error(err);
   } finally {
@@ -3338,6 +5111,21 @@ function switchScene(name) {
   document.getElementById("class-detail-screen")?.classList.toggle("hidden", name !== "class-detail");
   document.getElementById("lessons-screen").classList.toggle("hidden", name !== "lessons");
   document.getElementById("account-screen").classList.toggle("hidden", name !== "account");
+
+  const inLesson = name === "slideshow" || name === "study";
+  setTutorWidgetVisible(inLesson);
+
+  if (name === "slideshow") {
+    requestAnimationFrame(() => {
+      const activeSlide = document.querySelector("#slide-container .slide.active");
+      if (activeSlide) {
+        fitSlideTitle(activeSlide);
+        fitSlideContent(activeSlide);
+      }
+      fitSlideToStage();
+      if (notesVisible) setNotesVisible(true);
+    });
+  }
 
 
   if (name === "progress") {

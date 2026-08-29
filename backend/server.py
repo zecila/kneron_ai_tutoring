@@ -1,5 +1,7 @@
 import json
+import io
 import os
+import re
 import uuid
 import hashlib
 import logging
@@ -8,7 +10,11 @@ import threading
 import traceback
 import time
 import glob
+import wave
+from contextlib import contextmanager
+from queue import Empty, Queue
 from datetime import timedelta, datetime, timezone
+from urllib.parse import urlsplit
 from flask import Flask, jsonify, send_from_directory, request, Response, session
 from openai import OpenAI, APIConnectionError, RateLimitError, InternalServerError
 from werkzeug.utils import secure_filename
@@ -16,6 +22,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import HTTPException
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from redis import Redis
+from redis.exceptions import RedisError
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -1000,23 +1008,218 @@ def handle_error(e):
     raise e
 
     
+# ── Speech services ─────────────────────────────────────────────────────────────
+STT_WEBSOCKET_URL = os.environ.get("STT_WEBSOCKET_URL", "").strip()
+
+
+def _validated_stt_websocket_url(value):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("STT websocket URL is not configured")
+
+    websocket_url = value.strip()
+    parsed = urlsplit(websocket_url)
+    if (
+        parsed.scheme not in {"ws", "wss"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("STT websocket URL is invalid")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError("STT websocket URL is invalid") from exc
+    return websocket_url
+
+
+@app.route("/api/stt/config", methods=["GET"])
+def stt_config():
+    try:
+        websocket_url = _validated_stt_websocket_url(STT_WEBSOCKET_URL)
+    except ValueError as exc:
+        app.logger.error("STT configuration unavailable: %s", exc)
+        return jsonify({"error": str(exc)}), 503
+
+    response = jsonify({"websocket_url": websocket_url})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ── Text to Speech ───────────────────────────────────────────────────────────────
-TTS_BASE = os.environ["TTS_BASE_URL"]
-TTS_MODEL = "indextts1.5"
-TTS_VERSION = "kneo350"
+TTS_BASE = os.environ["TTS_BASE_URL"].rstrip("/")
+TTS_MODEL = os.environ.get("TTS_MODEL", "indextts1.5")
+TTS_VERSION = os.environ.get("TTS_VERSION", "kneo350")
+TUTOR_TTS_MODEL = os.environ.get("TUTOR_TTS_MODEL", TTS_MODEL)
+TUTOR_TTS_VERSION = os.environ.get("TUTOR_TTS_VERSION", TTS_VERSION)
+TTS_MAX_CHARS_PER_REQUEST = max(100, int(os.environ.get("TTS_MAX_CHARS_PER_REQUEST", "500")))
+TTS_MAX_RETRIES = 2
+
+
+class TTSServiceError(Exception):
+    def __init__(self, message, upstream=None, status_code=None):
+        super().__init__(message)
+        self.upstream = upstream
+        self.status_code = status_code
+
+
+class TutorSpeechSuperseded(Exception):
+    pass
+
+
+def _configured_tts_models():
+    models = []
+    seen = set()
+    for model_name, version in (
+        (TTS_MODEL, TTS_VERSION),
+        (TUTOR_TTS_MODEL, TUTOR_TTS_VERSION),
+    ):
+        key = (model_name, version)
+        if key not in seen:
+            seen.add(key)
+            models.append(key)
+    return models
+
+
+def _split_tts_text(text, max_chars=None):
+    max_chars = max_chars or TTS_MAX_CHARS_PER_REQUEST
+    remaining = re.sub(r"\s+", " ", text).strip()
+    chunks = []
+
+    while len(remaining) > max_chars:
+        window = remaining[:max_chars + 1]
+        sentence_cuts = [
+            match.end()
+            for match in re.finditer(r"[.!?](?:\s+|$)", window)
+            if match.end() <= max_chars
+        ]
+        cut = sentence_cuts[-1] if sentence_cuts and sentence_cuts[-1] >= max_chars // 2 else None
+        if cut is None:
+            word_cuts = [match.start() for match in re.finditer(r"\s+", window) if match.start() <= max_chars]
+            cut = word_cuts[-1] if word_cuts else max_chars
+
+        chunk = remaining[:cut].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _request_tts_wav_chunk(text, model_name, version, chunk_number, chunk_count):
+    last_err = None
+
+    for attempt in range(TTS_MAX_RETRIES + 1):
+        try:
+            r = requests.post(
+                f"{TTS_BASE}/audio/tts",
+                json={
+                    "text": text,
+                    "output_format": "audio",
+                    "model_name": model_name,
+                    "version": version
+                },
+                timeout=30
+            )
+            r.raise_for_status()
+            return r.content
+        except requests.exceptions.ChunkedEncodingError as e:
+            last_err = e
+            retrying = attempt < TTS_MAX_RETRIES
+            app.logger.warning(
+                f"TTS chunk {chunk_number}/{chunk_count} attempt {attempt + 1} "
+                f"dropped mid-stream{', retrying' if retrying else ''}: {e}"
+            )
+            continue
+        except requests.HTTPError as e:
+            status_code = e.response.status_code if e.response is not None else None
+            upstream = e.response.text if e.response is not None else None
+            app.logger.error(f"TTS upstream error: {status_code} - {upstream}")
+            raise TTSServiceError("TTS service unavailable", upstream=upstream, status_code=status_code) from e
+        except requests.RequestException as e:
+            app.logger.error(f"TTS request failed: {type(e).__name__}: {e}")
+            raise TTSServiceError("TTS service unavailable") from e
+
+    app.logger.error(
+        f"TTS chunk {chunk_number}/{chunk_count} failed after "
+        f"{TTS_MAX_RETRIES + 1} attempts: {last_err}"
+    )
+    raise TTSServiceError("TTS service unstable") from last_err
+
+
+def _merge_tts_wav_chunks(wav_chunks):
+    if len(wav_chunks) == 1:
+        return wav_chunks[0]
+
+    audio_format = None
+    frame_chunks = []
+    try:
+        for wav_bytes in wav_chunks:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as source:
+                chunk_format = (
+                    source.getnchannels(),
+                    source.getsampwidth(),
+                    source.getframerate(),
+                    source.getcomptype(),
+                    source.getcompname(),
+                )
+                if audio_format is None:
+                    audio_format = chunk_format
+                elif chunk_format != audio_format:
+                    raise TTSServiceError("TTS chunks returned incompatible WAV formats")
+                frame_chunks.append(source.readframes(source.getnframes()))
+    except (EOFError, wave.Error) as e:
+        raise TTSServiceError("TTS service returned an invalid WAV file") from e
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as merged:
+        channels, sample_width, frame_rate, compression_type, compression_name = audio_format
+        merged.setnchannels(channels)
+        merged.setsampwidth(sample_width)
+        merged.setframerate(frame_rate)
+        merged.setcomptype(compression_type, compression_name)
+        for frames in frame_chunks:
+            merged.writeframes(frames)
+    return output.getvalue()
+
+
+def _synthesize_tts_wav(text, model_name=None, version=None, should_continue=None):
+    model_name = model_name or TTS_MODEL
+    version = version or TTS_VERSION
+    text_chunks = _split_tts_text(text)
+    if not text_chunks:
+        raise TTSServiceError("No text provided for TTS")
+
+    if len(text_chunks) > 1:
+        app.logger.info(f"Splitting {len(text)} TTS characters into {len(text_chunks)} WAV chunks")
+
+    wav_chunks = []
+    for index, chunk in enumerate(text_chunks, start=1):
+        if should_continue is not None and not should_continue():
+            raise TutorSpeechSuperseded()
+        wav_chunks.append(
+            _request_tts_wav_chunk(chunk, model_name, version, index, len(text_chunks))
+        )
+        if should_continue is not None and not should_continue():
+            raise TutorSpeechSuperseded()
+    return _merge_tts_wav_chunks(wav_chunks)
+
 
 def init_tts():
-    try:
-        r = requests.post(f"{TTS_BASE}/init_model", json={
-            "model_name": TTS_MODEL,
-            "version": TTS_VERSION
-        })
-        if not r.ok:
-            print(f"TTS init failed: {r.status_code} - {r.text}")
-        r.raise_for_status()
-        print("TTS model initialized")
-    except Exception as e:
-        print(f"TTS init failed: {e}")
+    for model_name, version in _configured_tts_models():
+        try:
+            r = requests.post(f"{TTS_BASE}/init_model", json={
+                "model_name": model_name,
+                "version": version
+            })
+            if not r.ok:
+                print(f"TTS init failed: {r.status_code} - {r.text}")
+            r.raise_for_status()
+            print(f"TTS model initialized: {model_name}/{version}")
+        except Exception as e:
+            print(f"TTS init failed for {model_name}/{version}: {e}")
 
 @app.route("/api/tts", methods=["POST"])
 @limiter.limit("120 per hour")
@@ -1024,21 +1227,93 @@ def tts():
     text = request.json.get("text", "").strip()
     if not text:
         return jsonify({"error": "No text provided"}), 400
+    app.logger.info(f"TTS request: {len(text)} chars")
+
     try:
-        r = requests.post(
-            f"{TTS_BASE}/audio/tts",
-            json={
-                "text": text,
-                "output_format": "audio",
-                "model_name": TTS_MODEL,
-                "version": TTS_VERSION
-            },
-            timeout=30
-        )
-        r.raise_for_status()
-        return Response(r.content, mimetype="audio/wav")
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return Response(_synthesize_tts_wav(text), mimetype="audio/wav")
+    except TTSServiceError as e:
+        body = {"error": str(e)}
+        if e.upstream is not None:
+            body["upstream"] = e.upstream
+        return jsonify(body), 502
+
+
+# ── Avatar (OpenAvatarChat) LLM proxy ──────────────────────────────────────────
+# OpenAvatarChat's LLMOpenAICompatible handler talks to this route as if it were
+# an OpenAI-compatible endpoint. Lesson context will be added in a later step;
+# for now this route is just a thin relay to llm_client, re-streamed as SSE in
+# the shape the OpenAI SDK expects.
+#
+# Note: OAC's handler hardcodes a 5s client timeout (see llm_handler_openai_compatible.py).
+# Send OpenAI-shaped empty chunks while the real LLM is thinking so OAC's streaming
+# client does not time out before the first visible token arrives.
+# @app.route("/api/avatar/v1/chat/completions", methods=["POST"])
+# @limiter.limit("120 per hour")
+# def avatar_chat_completions():
+#     body = request.get_json(force=True, silent=True) or {}
+#     messages = body.get("messages")
+#     if not messages:
+#         return jsonify({"error": "No messages provided"}), 400
+#
+#     model = body.get("model") or "gpt-5.4-mini"
+#
+#     def empty_chunk():
+#         return {
+#             "id": f"chatcmpl-keepalive-{uuid.uuid4().hex}",
+#             "object": "chat.completion.chunk",
+#             "created": int(time.time()),
+#             "model": model,
+#             "choices": [
+#                 {
+#                     "index": 0,
+#                     "delta": {"role": "assistant", "content": ""},
+#                     "finish_reason": None,
+#                 }
+#             ],
+#         }
+#
+#     def generate():
+#         chunks = Queue()
+#
+#         def run_llm_stream():
+#             try:
+#                 stream = llm_client.chat.completions.create(
+#                     model=model,
+#                     messages=messages,
+#                     stream=True,
+#                     stream_options={"include_usage": True},
+#                 )
+#                 for chunk in stream:
+#                     chunks.put(("chunk", chunk))
+#                 chunks.put(("done", None))
+#             except (InternalServerError, APIConnectionError, RateLimitError) as e:
+#                 app.logger.error(f"Avatar LLM proxy upstream error: {repr(e)}")
+#                 chunks.put(("error", {"message": str(e), "type": "upstream_error"}))
+#             except Exception as e:
+#                 app.logger.error(f"Avatar LLM proxy failed: {repr(e)}")
+#                 chunks.put(("error", {"message": str(e), "type": "proxy_error"}))
+#
+#         threading.Thread(target=run_llm_stream, daemon=True).start()
+#
+#         yield f"data: {json.dumps(empty_chunk())}\n\n"
+#         while True:
+#             try:
+#                 kind, payload = chunks.get(timeout=2)
+#             except Empty:
+#                 yield f"data: {json.dumps(empty_chunk())}\n\n"
+#                 continue
+#
+#             if kind == "chunk":
+#                 yield f"data: {payload.model_dump_json()}\n\n"
+#             elif kind == "error":
+#                 yield f"data: {json.dumps({'error': payload})}\n\n"
+#                 yield "data: [DONE]\n\n"
+#                 return
+#             else:
+#                 yield "data: [DONE]\n\n"
+#                 return
+#
+#     return Response(generate(), mimetype="text/event-stream")
 
 
 # ── Pipeline orchestration ─────────────────────────────────────────────────────  ← new section
@@ -1353,8 +1628,770 @@ def get_lesson_media(lesson_id, filename):
         return jsonify({"error": "Invalid path"}), 400
     return send_from_directory(base_dir, filename)
 
+# ── OpenAvatarChat  ───────────────────────────────────────────────────────────────
+# OPENAVATARCHAT_BASE_URL = os.environ.get("OPENAVATARCHAT_BASE_URL", "https://localhost:8283").rstrip("/")
+# OPENAVATARCHAT_VERIFY_TLS = os.environ.get("OPENAVATARCHAT_VERIFY_TLS", "false").lower() in {"1", "true", "yes"}
+# OPENAVATARCHAT_SIGNALING_TIMEOUT = int(os.environ.get("OPENAVATARCHAT_SIGNALING_TIMEOUT", "60"))
+#
+# @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
+# @limiter.limit("600 per hour")
+# def avatar_webrtc_offer(lesson_id):
+#     user_id, session_id = current_identity()
+#     if not resolve_lesson_access(lesson_id, user_id, session_id):
+#         return jsonify({"error": "Lesson not found"}), 404
+#
+#     body = request.get_json(force=True, silent=True)
+#     if not isinstance(body, dict):
+#         return jsonify({"error": "Invalid JSON body"}), 400
+#     if body.get("type") not in {"offer", "ice-candidate"}:
+#         return jsonify({"error": "Unsupported WebRTC message type"}), 400
+#     if not body.get("webrtc_id"):
+#         return jsonify({"error": "Missing webrtc_id"}), 400
+#
+#     try:
+#         upstream = requests.post(
+#             f"{OPENAVATARCHAT_BASE_URL}/webrtc/offer",
+#             json=body,
+#             timeout=OPENAVATARCHAT_SIGNALING_TIMEOUT,
+#             verify=OPENAVATARCHAT_VERIFY_TLS,
+#         )
+#     except requests.RequestException as e:
+#         app.logger.error(f"OpenAvatarChat signaling proxy failed: {type(e).__name__}: {e}")
+#         return jsonify({"error": "OpenAvatarChat signaling unavailable"}), 502
+#
+#     return Response(
+#         upstream.content,
+#         status=upstream.status_code,
+#         content_type=upstream.headers.get("Content-Type", "application/json"),
+#     )
+
+# ── LiveTalking ────────────────────────────────────────────────────────────────
+LIVETALKING_BASE_URL = os.environ.get("LIVETALKING_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
+LIVETALKING_SIGNALING_TIMEOUT = int(os.environ.get("LIVETALKING_SIGNALING_TIMEOUT", "60"))
+LIVETALKING_COMMAND_TIMEOUT = int(os.environ.get("LIVETALKING_COMMAND_TIMEOUT", "15"))
+LIVETALKING_MAX_TEXT_LENGTH = 2000
+TUTOR_ATTEMPT_TTL_SECONDS = 3600
+TUTOR_CHAT_MODEL = os.environ.get("TUTOR_CHAT_MODEL", "gpt-5.4-mini")
+TUTOR_CHAT_HISTORY_LIMIT = 12
+TUTOR_CHAT_HISTORY_MAX_LENGTH = 12000
+TUTOR_CONTEXT_CONCEPT_LIMIT = 5
+_tutor_attempt_lock = threading.RLock()
+_tutor_attempts = {}
+_redis_url = os.environ.get("REDIS_URL", "memory://")
+_tutor_attempt_redis = (
+    Redis.from_url(_redis_url, decode_responses=True)
+    if _redis_url.startswith(("redis://", "rediss://"))
+    else None
+)
+TUTOR_CHAT_SYSTEM_PROMPT = (
+    "You are the tutoring agent for the learner's current lesson. Ground answers in the supplied lesson "
+    "context and prioritize the current slide or active study concept when the learner uses words like "
+    "this, that, here, or it. For broader questions, connect the answer to the most relevant concepts in "
+    "the lesson. You may use general knowledge to clarify the lesson, but do not contradict its material "
+    "or invent lesson-specific details. If the available context is insufficient, say so and ask a brief "
+    "clarifying question. Respond clearly and concisely in plain text that sounds natural when spoken aloud. "
+    "Use short sentences and brief paragraphs. Do not use Markdown, bullet points, numbered lists, headings, "
+    "tables, or list-marker hyphens. When listing several items, write them as natural prose using commas and "
+    "conjunctions."
+)
+TUTOR_CONTEXT_STOP_WORDS = {
+    "about", "after", "again", "also", "and", "are", "because", "been", "before", "being", "can",
+    "could", "does", "explain", "from", "have", "help", "here", "how", "into", "just", "lesson", "mean",
+    "means", "more", "most", "question", "that", "the", "their", "then", "there", "these", "they",
+    "this", "those", "topic", "understand", "what", "when", "where", "which", "why", "with", "work", "works",
+    "would", "you", "your",
+}
+
+
+@app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
+@limiter.limit("60 per hour")
+def avatar_webrtc_offer(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    if body.get("type") != "offer":
+        return jsonify({"error": "WebRTC message type must be 'offer'"}), 400
+    if not isinstance(body.get("sdp"), str) or not body["sdp"].strip():
+        return jsonify({"error": "Missing SDP offer"}), 400
+
+    try:
+        upstream = requests.post(
+            f"{LIVETALKING_BASE_URL}/offer",
+            json={"sdp": body["sdp"], "type": body["type"]},
+            timeout=LIVETALKING_SIGNALING_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        app.logger.error(f"LiveTalking signaling proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking signaling unavailable"}), 502
+
+    return Response(
+        upstream.content,
+        status=upstream.status_code,
+        content_type=upstream.headers.get("Content-Type", "application/json"),
+    )
+
+
+def _tutor_context_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _tutor_context_terms(value):
+    return {
+        term
+        for term in re.findall(r"[a-z0-9]+", _tutor_context_text(value).lower())
+        if len(term) > 2 and term not in TUTOR_CONTEXT_STOP_WORDS
+    }
+
+
+def _tutor_concept_score(concept, question):
+    question_text = question.lower()
+    question_terms = _tutor_context_terms(question)
+    if not question_terms:
+        return 0
+
+    name = _tutor_context_text(concept.get("name"))
+    description = _tutor_context_text(concept.get("description"))
+    study = concept.get("study") or {}
+    key_terms = study.get("key_terms") or []
+    formulas = study.get("formulas") or []
+    flashcards = study.get("flashcards") or []
+
+    score = 0
+    if name and name.lower() in question_text:
+        score += 20
+    score += 5 * len(question_terms & _tutor_context_terms(name))
+    score += 2 * len(question_terms & _tutor_context_terms(description))
+
+    for item in key_terms:
+        term = _tutor_context_text(item.get("term"))
+        if term and term.lower() in question_text:
+            score += 12
+        score += 4 * len(question_terms & _tutor_context_terms(term))
+        score += len(question_terms & _tutor_context_terms(item.get("definition")))
+
+    supporting_text = [
+        *(_tutor_context_text(item.get("latex")) + " " + _tutor_context_text(item.get("explanation")) for item in formulas),
+        *(_tutor_context_text(item.get("front")) + " " + _tutor_context_text(item.get("back")) for item in flashcards),
+    ]
+    score += len(question_terms & _tutor_context_terms(" ".join(supporting_text)))
+    return score
+
+
+def _format_tutor_concept(concept):
+    lines = [f"## {_tutor_context_text(concept.get('name'))}"]
+    description = _tutor_context_text(concept.get("description"))
+    if description:
+        lines.append(description)
+
+    study = concept.get("study") or {}
+    key_terms = study.get("key_terms") or []
+    if key_terms:
+        lines.append("Key terms:")
+        lines.extend(
+            f"- {_tutor_context_text(item.get('term'))}: {_tutor_context_text(item.get('definition'))}"
+            for item in key_terms
+        )
+
+    formulas = study.get("formulas") or []
+    if formulas:
+        lines.append("Formulas:")
+        lines.extend(
+            f"- {_tutor_context_text(item.get('latex'))}: {_tutor_context_text(item.get('explanation'))}"
+            for item in formulas
+        )
+
+    flashcards = study.get("flashcards") or []
+    if flashcards:
+        lines.append("Study checks:")
+        lines.extend(
+            f"- Q: {_tutor_context_text(item.get('front'))} A: {_tutor_context_text(item.get('back'))}"
+            for item in flashcards
+        )
+
+    return "\n".join(lines)
+
+
+def _build_tutor_lesson_context(lesson_id, question, current_slide_index=None, active_concept_id=None, scene=None):
+    with open(lesson_path(lesson_id, "extracted_concepts.json"), encoding="utf-8") as f:
+        curriculum = json.load(f)["curriculum_graph"]
+    with open(lesson_path(lesson_id, "slideshow.json"), encoding="utf-8") as f:
+        slideshow = json.load(f)["slideshow"]
+
+    concepts = curriculum.get("concepts") or []
+    slides = slideshow.get("slides") or []
+    concept_lookup = {
+        concept.get("concept_id"): concept
+        for concept in concepts
+        if concept.get("concept_id")
+    }
+
+    current_slide = None
+    if current_slide_index is not None:
+        if current_slide_index < 0 or current_slide_index >= len(slides):
+            raise IndexError("Current slide is out of range")
+        current_slide = slides[current_slide_index]
+
+    selected_ids = []
+    if active_concept_id in concept_lookup:
+        selected_ids.append(active_concept_id)
+
+    slide_concept_ids = []
+    if current_slide:
+        for concept_id in current_slide.get("concept_ids") or []:
+            if concept_id in concept_lookup and concept_id not in selected_ids and concept_id not in slide_concept_ids:
+                slide_concept_ids.append(concept_id)
+
+    available_slots = TUTOR_CONTEXT_CONCEPT_LIMIT - len(selected_ids)
+    if len(slide_concept_ids) <= available_slots:
+        selected_ids.extend(slide_concept_ids)
+    else:
+        ranked_slide_concepts = sorted(
+            (_tutor_concept_score(concept_lookup[concept_id], question), concept_id)
+            for concept_id in slide_concept_ids
+        )
+        for score, concept_id in reversed(ranked_slide_concepts):
+            if score <= 0 or len(selected_ids) >= TUTOR_CONTEXT_CONCEPT_LIMIT:
+                break
+            selected_ids.append(concept_id)
+
+    ranked_concepts = sorted(
+        (
+            (_tutor_concept_score(concept, question), concept.get("concept_id"))
+            for concept in concepts
+            if concept.get("concept_id") and concept.get("concept_id") not in selected_ids
+        ),
+        reverse=True,
+    )
+    for score, concept_id in ranked_concepts:
+        if score <= 0 or len(selected_ids) >= TUTOR_CONTEXT_CONCEPT_LIMIT:
+            break
+        selected_ids.append(concept_id)
+
+    assignment = get_assignment_for_lesson(lesson_id)
+    course_name = (
+        assignment.get("title")
+        if assignment and assignment.get("title")
+        else curriculum.get("course", "Untitled course")
+    )
+    parts = [
+        "# Lesson overview",
+        f"Course: {course_name}",
+        "Concept map: " + "; ".join(
+            f"{concept.get('concept_id')}: {_tutor_context_text(concept.get('name'))}"
+            for concept in concepts
+        ),
+    ]
+
+    location_lines = ["# Student location"]
+    if scene in {"slideshow", "study"}:
+        location_lines.append(f"View: {scene}")
+    if current_slide:
+        location_lines.extend([
+            f"Current slide: {current_slide_index + 1} of {len(slides)}",
+            f"Title: {_tutor_context_text(current_slide.get('title'))}",
+            f"Type: {_tutor_context_text(current_slide.get('type'))}",
+        ])
+        body = current_slide.get("body") or []
+        if body:
+            location_lines.append("Visible slide content:")
+            for item in body:
+                item_type = _tutor_context_text(item.get("type")) or "content"
+                content = _tutor_context_text(item.get("content"))
+                if content:
+                    location_lines.append(f"- [{item_type}] {content}")
+        speaker_notes = _tutor_context_text(current_slide.get("speaker_notes"))
+        if speaker_notes:
+            location_lines.append(f"Speaker notes: {speaker_notes}")
+    if active_concept_id in concept_lookup:
+        location_lines.append(
+            "Active study concept: " + _tutor_context_text(concept_lookup[active_concept_id].get("name"))
+        )
+    parts.append("\n".join(location_lines))
+
+    if selected_ids:
+        parts.append(
+            "# Detailed relevant concepts\n" + "\n\n".join(
+                _format_tutor_concept(concept_lookup[concept_id])
+                for concept_id in selected_ids
+            )
+        )
+
+    return "\n\n".join(parts)
+
+
+@app.route("/api/lessons/<lesson_id>/tutor/message", methods=["POST"])
+@limiter.limit("120 per hour")
+def tutor_message(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return jsonify({"error": "No message provided"}), 400
+    message = message.strip()
+    if len(message) > LIVETALKING_MAX_TEXT_LENGTH:
+        return jsonify({"error": f"Message must be {LIVETALKING_MAX_TEXT_LENGTH} characters or fewer"}), 400
+
+    history = body.get("history", [])
+    if not isinstance(history, list) or len(history) > 50:
+        return jsonify({"error": "Invalid conversation history"}), 400
+
+    normalized_history = []
+    history_length = 0
+    for item in history[-TUTOR_CHAT_HISTORY_LIMIT:]:
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            return jsonify({"error": "Invalid conversation history"}), 400
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return jsonify({"error": "Invalid conversation history"}), 400
+        content = content.strip()
+        if len(content) > LIVETALKING_MAX_TEXT_LENGTH:
+            return jsonify({"error": "Conversation message is too long"}), 400
+        history_length += len(content)
+        normalized_history.append({"role": item["role"], "content": content})
+
+    if history_length > TUTOR_CHAT_HISTORY_MAX_LENGTH:
+        return jsonify({"error": "Conversation history is too long"}), 400
+
+    current_slide_index = body.get("current_slide_index")
+    if current_slide_index is not None and (
+        isinstance(current_slide_index, bool) or not isinstance(current_slide_index, int)
+    ):
+        return jsonify({"error": "Invalid current slide index"}), 400
+
+    active_concept_id = body.get("active_concept_id")
+    if active_concept_id is not None and (
+        not isinstance(active_concept_id, str) or len(active_concept_id) > 128
+    ):
+        return jsonify({"error": "Invalid active concept ID"}), 400
+
+    scene = body.get("scene")
+    if scene is not None and scene not in {"slideshow", "study"}:
+        return jsonify({"error": "Invalid lesson view"}), 400
+
+    try:
+        lesson_context = _build_tutor_lesson_context(
+            lesson_id,
+            message,
+            current_slide_index=current_slide_index,
+            active_concept_id=active_concept_id,
+            scene=scene,
+        )
+    except (FileNotFoundError, KeyError, IndexError):
+        return jsonify({"error": "Lesson context is unavailable"}), 404
+    except (json.JSONDecodeError, ValueError) as e:
+        app.logger.error(f"Tutor lesson context is invalid: {e}")
+        return jsonify({"error": "Lesson context is invalid"}), 500
+
+    try:
+        completion = llm_client.chat.completions.create(
+            model=TUTOR_CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": TUTOR_CHAT_SYSTEM_PROMPT},
+                {"role": "system", "content": "LESSON CONTEXT\n" + lesson_context},
+                *normalized_history,
+                {"role": "user", "content": message},
+            ],
+            max_tokens=500,
+        )
+        reply = completion.choices[0].message.content
+    except (InternalServerError, APIConnectionError, RateLimitError) as e:
+        app.logger.error(f"Tutor LLM upstream error: {type(e).__name__}: {e}")
+        return jsonify({"error": "Tutor response service unavailable"}), 502
+    except Exception as e:
+        app.logger.exception(f"Tutor LLM request failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "Tutor response could not be generated"}), 502
+
+    if not isinstance(reply, str) or not reply.strip():
+        app.logger.error("Tutor LLM returned an empty response")
+        return jsonify({"error": "Tutor response was empty"}), 502
+
+    reply = reply.strip()
+    if len(reply) > LIVETALKING_MAX_TEXT_LENGTH:
+        reply = reply[:LIVETALKING_MAX_TEXT_LENGTH - 3].rsplit(" ", 1)[0].rstrip() + "..."
+
+    return jsonify({"reply": reply})
+
+
+TUTOR_SPEECH_UNITS = {
+    "mm": "millimeters",
+    "cm": "centimeters",
+    "m": "meters",
+    "km": "kilometers",
+    "in": "inches",
+    "ft": "feet",
+    "yd": "yards",
+    "mi": "miles",
+}
+TUTOR_SPEECH_SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
+
+
+def _normalize_tutor_speech_text(text):
+    def replace_unit_power(match):
+        power = match.group("power") or match.group("power_unicode")
+        dimension = "square" if power in {"2", "²"} else "cubic"
+        return f"{dimension} {TUTOR_SPEECH_UNITS[match.group('unit')]}"
+
+    def replace_superscript(match):
+        superscript = match.group(0)
+        if superscript == "²":
+            return " squared"
+        if superscript == "³":
+            return " cubed"
+        exponent = superscript.translate(TUTOR_SPEECH_SUPERSCRIPT_DIGITS)
+        if exponent.startswith("-"):
+            exponent = "negative " + exponent[1:]
+        return " to the power of " + exponent
+
+    speech = text.strip()
+    standalone_symbol = {
+        "-": "minus",
+        "−": "minus",
+        "<": "less than",
+        ">": "greater than",
+    }.get(speech)
+    if standalone_symbol:
+        return standalone_symbol
+
+    speech = speech.replace("`", "")
+    speech = re.sub(
+        r"\b(?P<unit>mm|cm|km|m|in|ft|yd|mi)\s*(?:\^(?:\{)?(?P<power>2|3)(?:\})?|(?P<power_unicode>[²³]))",
+        replace_unit_power,
+        speech,
+    )
+    speech = re.sub(r"\^\s*(?:\{\s*)?2\s*(?:\})?", " squared", speech)
+    speech = re.sub(r"\^\s*(?:\{\s*)?3\s*(?:\})?", " cubed", speech)
+    speech = re.sub(
+        r"\^\s*(?:\{\s*)?(-?\d+)\s*(?:\})?",
+        lambda match: f" to the power of {match.group(1)}",
+        speech,
+    )
+    speech = re.sub(
+        r"[⁰¹²³⁴⁵⁶⁷⁸⁹⁻]+",
+        replace_superscript,
+        speech,
+    )
+    speech = speech.replace("°C", " degrees Celsius").replace("°F", " degrees Fahrenheit")
+    speech = speech.replace("°", " degrees")
+    speech = re.sub(r"(?<=\d)\s*[-−]\s*(?=\d)", " minus ", speech)
+    speech = re.sub(r"(?<![\w)])[-−]\s*(?=\d)", " negative ", speech)
+    speech = re.sub(r"(?<![A-Za-z0-9])[-−](?![A-Za-z0-9])", " minus ", speech)
+    for symbol, spoken in {
+        "×": " times ",
+        "÷": " divided by ",
+        "≠": " does not equal ",
+        "≤": " is less than or equal to ",
+        "≥": " is greater than or equal to ",
+        "<=": " is less than or equal to ",
+        ">=": " is greater than or equal to ",
+        "=": " equals ",
+        "<": " is less than ",
+        ">": " is greater than ",
+        "%": " percent",
+    }.items():
+        speech = speech.replace(symbol, spoken)
+    speech = re.sub(r"[ \t]+", " ", speech)
+    speech = re.sub(r"\s*\n+\s*", ". ", speech)
+    speech = re.sub(r"\s+([,.;:!?])", r"\1", speech)
+    return speech.strip()
+
+
+class LiveTalkingCommandError(Exception):
+    pass
+
+
+def _parse_livetalking_command_response(upstream):
+    try:
+        result = upstream.json()
+    except ValueError as e:
+        raise LiveTalkingCommandError("Invalid response from LiveTalking") from e
+
+    if not isinstance(result, dict) or result.get("code") != 0:
+        message = (
+            result.get("msg", "LiveTalking command failed")
+            if isinstance(result, dict)
+            else "LiveTalking command failed"
+        )
+        raise LiveTalkingCommandError(message)
+    return result
+
+
+def _post_livetalking_command(path, payload):
+    upstream = requests.post(
+        f"{LIVETALKING_BASE_URL}{path}",
+        json=payload,
+        timeout=LIVETALKING_COMMAND_TIMEOUT,
+    )
+    upstream.raise_for_status()
+    return _parse_livetalking_command_response(upstream)
+
+
+def _post_livetalking_audio(avatar_session_id, wav_bytes):
+    upstream = requests.post(
+        f"{LIVETALKING_BASE_URL}/humanaudio",
+        data={"sessionid": avatar_session_id},
+        files={"file": ("tutor.wav", wav_bytes, "audio/wav")},
+        timeout=LIVETALKING_COMMAND_TIMEOUT,
+    )
+    upstream.raise_for_status()
+    return _parse_livetalking_command_response(upstream)
+
+
+def _avatar_session_id_from_body(body):
+    avatar_session_id = body.get("sessionid") if isinstance(body, dict) else None
+    if not isinstance(avatar_session_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_-]{1,128}", avatar_session_id
+    ):
+        return None
+    return avatar_session_id
+
+
+def _avatar_attempt_id_from_body(body):
+    attempt_id = body.get("attempt_id") if isinstance(body, dict) else None
+    if isinstance(attempt_id, bool) or not isinstance(attempt_id, int) or attempt_id < 1:
+        return None
+    return attempt_id
+
+
+def _tutor_attempt_key(avatar_session_id):
+    return f"kneron:tutor-attempt:{avatar_session_id}"
+
+
+@contextmanager
+def _tutor_attempt_guard(avatar_session_id):
+    if _tutor_attempt_redis is not None:
+        lock = _tutor_attempt_redis.lock(
+            _tutor_attempt_key(avatar_session_id) + ":lock",
+            timeout=30,
+            blocking_timeout=10,
+        )
+        if not lock.acquire(blocking=True):
+            raise RedisError("Timed out waiting for tutor attempt lock")
+        try:
+            yield
+        finally:
+            lock.release()
+        return
+    with _tutor_attempt_lock:
+        yield
+
+
+def _set_current_tutor_attempt(avatar_session_id, attempt_id):
+    value = str(attempt_id)
+    if _tutor_attempt_redis is not None:
+        _tutor_attempt_redis.set(
+            _tutor_attempt_key(avatar_session_id),
+            value,
+            ex=TUTOR_ATTEMPT_TTL_SECONDS,
+        )
+        return
+    with _tutor_attempt_lock:
+        _tutor_attempts[avatar_session_id] = value
+
+
+def _claim_or_is_current_tutor_attempt(avatar_session_id, attempt_id):
+    value = str(attempt_id)
+    if _tutor_attempt_redis is not None:
+        key = _tutor_attempt_key(avatar_session_id)
+        if _tutor_attempt_redis.set(key, value, nx=True, ex=TUTOR_ATTEMPT_TTL_SECONDS):
+            return True
+        return _tutor_attempt_redis.get(key) == value
+    with _tutor_attempt_lock:
+        current = _tutor_attempts.setdefault(avatar_session_id, value)
+        return current == value
+
+
+def _is_current_tutor_attempt(avatar_session_id, attempt_id):
+    value = str(attempt_id)
+    if _tutor_attempt_redis is not None:
+        return _tutor_attempt_redis.get(_tutor_attempt_key(avatar_session_id)) == value
+    with _tutor_attempt_lock:
+        return _tutor_attempts.get(avatar_session_id) == value
+
+
+@app.route("/api/lessons/<lesson_id>/avatar/speak", methods=["POST"])
+@limiter.limit("120 per hour")
+def avatar_speak(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    avatar_session_id = _avatar_session_id_from_body(body)
+    if avatar_session_id is None:
+        return jsonify({"error": "Invalid avatar session ID"}), 400
+    attempt_id = _avatar_attempt_id_from_body(body)
+    if attempt_id is None:
+        return jsonify({"error": "Invalid tutor attempt ID"}), 400
+
+    try:
+        if not _claim_or_is_current_tutor_attempt(avatar_session_id, attempt_id):
+            return jsonify({"error": "Tutor response was superseded", "superseded": True}), 409
+    except RedisError as e:
+        app.logger.error(f"Tutor attempt store unavailable: {e}")
+        return jsonify({"error": "Tutor coordination service unavailable"}), 503
+
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"error": "No text provided"}), 400
+    text = text.strip()
+    if len(text) > LIVETALKING_MAX_TEXT_LENGTH:
+        return jsonify({"error": f"Text must be {LIVETALKING_MAX_TEXT_LENGTH} characters or fewer"}), 400
+    speech_text = _normalize_tutor_speech_text(text)
+    if len(speech_text) > LIVETALKING_MAX_TEXT_LENGTH:
+        speech_text = speech_text[:LIVETALKING_MAX_TEXT_LENGTH - 3].rsplit(" ", 1)[0].rstrip() + "..."
+
+    interrupt = body.get("interrupt", True)
+    if not isinstance(interrupt, bool):
+        return jsonify({"error": "interrupt must be a boolean"}), 400
+
+    try:
+        if interrupt:
+            with _tutor_attempt_guard(avatar_session_id):
+                if not _is_current_tutor_attempt(avatar_session_id, attempt_id):
+                    raise TutorSpeechSuperseded()
+                _post_livetalking_command("/interrupt_talk", {"sessionid": avatar_session_id})
+        wav_bytes = _synthesize_tts_wav(
+            speech_text,
+            model_name=TUTOR_TTS_MODEL,
+            version=TUTOR_TTS_VERSION,
+            should_continue=lambda: _is_current_tutor_attempt(avatar_session_id, attempt_id),
+        )
+        with _tutor_attempt_guard(avatar_session_id):
+            if not _is_current_tutor_attempt(avatar_session_id, attempt_id):
+                raise TutorSpeechSuperseded()
+            _post_livetalking_audio(avatar_session_id, wav_bytes)
+    except TutorSpeechSuperseded:
+        return jsonify({"error": "Tutor response was superseded", "superseded": True}), 409
+    except RedisError as e:
+        app.logger.error(f"Tutor attempt store unavailable: {e}")
+        return jsonify({"error": "Tutor coordination service unavailable"}), 503
+    except TTSServiceError as e:
+        app.logger.error(f"Tutor TTS failed: {e}")
+        body = {"error": str(e)}
+        if e.upstream is not None:
+            body["upstream"] = e.upstream
+        return jsonify(body), 502
+    except requests.RequestException as e:
+        app.logger.error(f"LiveTalking speech proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking speech service unavailable"}), 502
+    except LiveTalkingCommandError as e:
+        app.logger.warning(f"LiveTalking rejected speech request: {e}")
+        return jsonify({"error": str(e)}), 502
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lessons/<lesson_id>/avatar/interrupt", methods=["POST"])
+@limiter.limit("240 per hour")
+def avatar_interrupt(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    avatar_session_id = _avatar_session_id_from_body(body)
+    if avatar_session_id is None:
+        return jsonify({"error": "Invalid avatar session ID"}), 400
+    attempt_id = _avatar_attempt_id_from_body(body)
+    if attempt_id is None:
+        return jsonify({"error": "Invalid tutor attempt ID"}), 400
+
+    try:
+        with _tutor_attempt_guard(avatar_session_id):
+            _set_current_tutor_attempt(avatar_session_id, attempt_id)
+            _post_livetalking_command("/interrupt_talk", {"sessionid": avatar_session_id})
+    except RedisError as e:
+        app.logger.error(f"Tutor attempt store unavailable: {e}")
+        return jsonify({"error": "Tutor coordination service unavailable"}), 503
+    except requests.RequestException as e:
+        app.logger.error(f"LiveTalking interrupt proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking interrupt service unavailable"}), 502
+    except LiveTalkingCommandError as e:
+        app.logger.warning(f"LiveTalking rejected interrupt request: {e}")
+        return jsonify({"error": str(e)}), 502
+
+    return jsonify({"ok": True})
+
+
+@app.route("/api/lessons/<lesson_id>/avatar/speaking", methods=["POST"])
+@limiter.limit("1200 per hour")
+def avatar_speaking(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    avatar_session_id = _avatar_session_id_from_body(body)
+    if avatar_session_id is None:
+        return jsonify({"error": "Invalid avatar session ID"}), 400
+
+    try:
+        result = _post_livetalking_command("/is_speaking", {"sessionid": avatar_session_id})
+    except requests.RequestException as e:
+        app.logger.error(f"LiveTalking speaking-status proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking speaking-status service unavailable"}), 502
+    except LiveTalkingCommandError as e:
+        app.logger.warning(f"LiveTalking rejected speaking-status request: {e}")
+        return jsonify({"error": str(e)}), 502
+
+    if not isinstance(result.get("data"), bool):
+        app.logger.warning("LiveTalking speaking-status response did not contain a boolean state")
+        return jsonify({"error": "Invalid speaking status from LiveTalking"}), 502
+    return jsonify({"speaking": result["data"]})
+
+
+@app.route("/api/lessons/<lesson_id>/avatar/disconnect", methods=["POST"])
+@limiter.limit("240 per hour")
+def avatar_disconnect(lesson_id):
+    user_id, session_id = current_identity()
+    if not resolve_lesson_access(lesson_id, user_id, session_id):
+        return jsonify({"error": "Lesson not found"}), 404
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    avatar_session_id = _avatar_session_id_from_body(body)
+    if avatar_session_id is None:
+        return jsonify({"error": "Invalid avatar session ID"}), 400
+
+    try:
+        result = _post_livetalking_command("/close_session", {"sessionid": avatar_session_id})
+    except requests.RequestException as e:
+        app.logger.error(f"LiveTalking disconnect proxy failed: {type(e).__name__}: {e}")
+        return jsonify({"error": "LiveTalking disconnect service unavailable"}), 502
+    except LiveTalkingCommandError as e:
+        app.logger.warning(f"LiveTalking rejected disconnect request: {e}")
+        return jsonify({"error": str(e)}), 502
+
+    data = result.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("closed"), bool):
+        app.logger.warning("LiveTalking disconnect response did not contain a boolean state")
+        return jsonify({"error": "Invalid disconnect response from LiveTalking"}), 502
+    return jsonify({"ok": True, "closed": data["closed"]})
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
         init_tts()
-    app.run(debug=True, port=5000, threaded=True)
+    app.run(debug=True, host="0.0.0.0", port=5000, threaded=True)

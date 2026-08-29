@@ -3049,6 +3049,329 @@ html, body {
 }
 
 
+/* ── Tutor chat widget ────────────────────────────────────────── */
+#tutor-chat-widget {
+  position: fixed;
+  bottom: 72px;
+  right: 12px;
+  z-index: 500;
+}
+
+#tutor-chat-toggle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+#tutor-chat-toggle:hover { background: var(--accent-dim); }
+#tutor-chat-toggle svg { width: 20px; height: 20px; }
+
+#tutor-chat-panel {
+  position: absolute;
+  bottom: 52px;
+  right: 0;
+  width: min(320px, calc(100vw - 24px));
+  height: min(620px, calc(100vh - 220px));
+  height: min(620px, calc(100dvh - 220px));
+  min-height: 320px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: var(--font-body);
+}
+#tutor-chat-panel.hidden { display: none; }
+
+#tutor-chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 10px;
+  background: var(--bg);
+  color: var(--surface);
+  font-family: var(--font-display);
+}
+#tutor-chat-header span {
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+#tutor-chat-header button {
+  width: 26px;
+  height: 26px;
+  background: none;
+  border: none;
+  color: var(--surface);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+}
+#tutor-chat-header button:hover {
+  color: var(--accent);
+}
+#tutor-chat-avatar {
+  flex: 0 0 var(--tutor-avatar-height, clamp(190px, 58%, 330px));
+  min-height: 0;
+  max-height: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #111827;
+  border-bottom: 1px solid var(--border);
+  will-change: flex-basis;
+}
+
+#tutor-chat-avatar-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  background: #111827;
+}
+
+#tutor-chat-messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  font-size: var(--font-size);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tutor-chat-bubble {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  max-width: 80%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-wrap: break-word;
+}
+
+.tutor-chat-bubble-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: #fff;
+}
+
+.tutor-chat-bubble-agent {
+  align-self: flex-start;
+  background: var(--surface-alt, #f3f4f6);
+  color: var(--text);
+}
+
+.tutor-chat-bubble-error {
+  border: 1px solid #f59e0b;
+}
+
+.tutor-connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.tutor-connection-status span {
+  flex: 1;
+  min-width: 0;
+}
+
+.tutor-connection-retry {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tutor-connection-retry:hover {
+  background: rgb(0 0 0 / 6%);
+}
+
+.tutor-connection-retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.tutor-chat-bubble-interrupted {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+#tutor-chat-input-row {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 8px;
+  gap: 8px;
+}
+
+#tutor-chat-input-shell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface, #fff);
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+#tutor-chat-input-shell:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+#tutor-chat-input-shell.is-recording {
+  border-color: #dc2626;
+  box-shadow: 0 0 0 2px rgb(220 38 38 / 12%);
+}
+
+#tutor-chat-input {
+  width: 100%;
+  min-width: 0;
+  border: none;
+  outline: none;
+  border-radius: inherit;
+  padding: 8px 42px 8px 10px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--font-size);
+}
+
+#tutor-chat-input-shell.is-recording #tutor-chat-input {
+  padding-right: 56px;
+  pointer-events: none;
+}
+
+#tutor-chat-recording-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.tutor-recording-level {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  display: none;
+  width: 5px;
+  height: 20px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgb(220 38 38 / 18%);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+#tutor-chat-input-shell.is-recording .tutor-recording-level {
+  display: block;
+}
+
+.tutor-recording-level-fill {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--tutor-mic-level, 4%);
+  border-radius: inherit;
+  background: #dc2626;
+  transition: height 80ms linear;
+}
+
+#tutor-chat-input-shell.is-requesting .tutor-recording-level {
+  opacity: 0.35;
+}
+
+#tutor-chat-mic {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+}
+
+#tutor-chat-mic:hover {
+  background: var(--surface-alt, #f3f4f6);
+  color: var(--text);
+}
+
+#tutor-chat-mic:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+#tutor-chat-mic svg {
+  width: 18px;
+  height: 18px;
+}
+
+.tutor-cancel-recording-icon { display: none; }
+
+#tutor-chat-input-shell.is-recording #tutor-chat-mic {
+  right: 16px;
+  color: #b91c1c;
+}
+
+#tutor-chat-input-shell.is-recording .tutor-mic-icon { display: none; }
+#tutor-chat-input-shell.is-recording .tutor-cancel-recording-icon { display: block; }
+
+#tutor-chat-send {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius);
+  padding: 0 12px;
+  cursor: pointer;
+}
+#tutor-chat-send:hover { background: var(--accent-dim); }
+#tutor-chat-send:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tutor-recording-level-fill { transition: none; }
+}
+
+
 /* ── Responsive ──────────────────────────────────────────────────────────────── */
 @media (max-width: 960px) {
 
