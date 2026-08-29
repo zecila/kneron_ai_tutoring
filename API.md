@@ -355,9 +355,13 @@ Returns the browser-facing streaming STT WebSocket URL configured through `STT_W
 
 The browser connects directly to this URL. This endpoint does not initialize an STT model or proxy audio.
 
-The tutor microphone currently expects a Deepgram-compatible streaming endpoint, such as WhisperLiveKit's
-`/v1/listen`, configured for 16 kHz mono `linear16` audio with interim results enabled. During recording,
-the browser displays interim and finalized transcript text but does not submit it as a chat message.
+The tutor microphone expects a Deepgram-compatible streaming endpoint, such as WhisperLiveKit's `/v1/listen`,
+configured for 16 kHz mono `linear16` audio with interim results and VAD events enabled. During recording, the
+browser displays interim and finalized transcript text in the chat input. A non-empty `speech_final` result is
+shown for 600 ms and then submitted through the same tutor message flow as typed text. New speech or any normal
+recording cancellation clears the pending submission. Recordings are limited to 60 seconds and transcripts to
+2,000 characters; reaching either limit submits the current non-empty transcript. Hiding the page or detecting
+a long timer gap after device sleep cancels and discards the active recording.
 
 ---
 

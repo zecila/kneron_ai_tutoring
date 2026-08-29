@@ -3180,6 +3180,38 @@ html, body {
   border: 1px solid #f59e0b;
 }
 
+.tutor-connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.tutor-connection-status span {
+  flex: 1;
+  min-width: 0;
+}
+
+.tutor-connection-retry {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tutor-connection-retry:hover {
+  background: rgb(0 0 0 / 6%);
+}
+
+.tutor-connection-retry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .tutor-chat-bubble-interrupted {
   color: var(--text-muted);
   font-style: italic;

@@ -2378,15 +2378,23 @@ function toggleSidebar() {
 const TUTOR_SPEAKING_POLL_INTERVAL_MS = 500;
 const TUTOR_SPEAKING_START_TIMEOUT_MS = 30000;
 const TUTOR_SPEAKING_IDLE_CONFIRMATIONS = 2;
+const TUTOR_WEBRTC_READY_TIMEOUT_MS = 20000;
+const TUTOR_WEBRTC_DISCONNECTED_GRACE_MS = 5000;
+const TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS = 3;
+const TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS = 1000;
 
 const TutorSession = {
   peerConnection: null,
   sessionId: null,
   activeLessonId: null,
   remoteStream: null,
+  connectionReady: false,
   connectingPromise: null,
   disconnecting: false,
   connectionAttempt: 0,
+  disconnectedGraceTimer: null,
+  recoveryTimer: null,
+  recoveryAttempt: 0,
   conversationLessonId: null,
   conversation: [],
   speechState: "idle",
@@ -2396,12 +2404,13 @@ const TutorSession = {
   replyAbortController: null,
   activePendingReply: null,
 
-  async connect(activeLessonId) {
+  async connect(activeLessonId, { recovery = false } = {}) {
     if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
     if (
       this.activeLessonId === activeLessonId &&
       this.sessionId &&
-      ["new", "connecting", "connected"].includes(this.peerConnection?.connectionState)
+      this.connectionReady &&
+      this.peerConnection?.connectionState === "connected"
     ) {
       return this.sessionId;
     }
@@ -2409,7 +2418,7 @@ const TutorSession = {
       return this.connectingPromise;
     }
 
-    const releasePromise = this.disconnect();
+    const releasePromise = this.disconnect({ preserveRecovery: recovery });
     this.activeLessonId = activeLessonId;
     const connectionAttempt = this.connectionAttempt;
     let connectingPromise;
@@ -2420,8 +2429,22 @@ const TutorSession = {
         }
         return this._connect(activeLessonId);
       })
+      .then((sessionId) => {
+        if (
+          this.connectionAttempt !== connectionAttempt ||
+          this.activeLessonId !== activeLessonId ||
+          !this._isPeerMediaReady(this.peerConnection)
+        ) {
+          throw new Error("Avatar media became unavailable while connecting.");
+        }
+        this.connectionReady = true;
+        this._cancelRecovery();
+        return sessionId;
+      })
       .catch((err) => {
-        if (this.connectionAttempt === connectionAttempt) this.disconnect();
+        if (this.connectionAttempt === connectionAttempt) {
+          this.disconnect({ preserveRecovery: recovery });
+        }
         throw err;
       })
       .finally(() => {
@@ -2441,6 +2464,7 @@ const TutorSession = {
     this.peerConnection = pc;
     this.sessionId = null;
     this.remoteStream = new MediaStream();
+    this.connectionReady = false;
     videoEl.srcObject = this.remoteStream;
 
     pc.addEventListener("track", (event) => {
@@ -2448,22 +2472,16 @@ const TutorSession = {
       if (!this.remoteStream.getTracks().includes(event.track)) {
         this.remoteStream.addTrack(event.track);
       }
+      event.track.addEventListener("ended", () => {
+        if (pc !== this.peerConnection || !this.connectionReady) return;
+        this._handleUnexpectedConnectionLoss(pc);
+      }, { once: true });
       videoEl.play().catch((err) => console.debug("Tutor avatar autoplay deferred:", err));
     });
 
     pc.addEventListener("connectionstatechange", () => {
       console.debug("[TutorSession] peer connection:", pc.connectionState);
-      if (pc !== this.peerConnection) return;
-      if (pc.connectionState === "failed") {
-        this._stopSpeakingMonitor();
-        this._setSpeechState("idle");
-        setTutorConnectionStatus("Avatar connection lost.", true);
-        this.disconnect();
-      } else if (pc.connectionState === "closed") {
-        this._stopSpeakingMonitor();
-        this._setSpeechState("idle");
-        this.disconnect();
-      }
+      this._handlePeerConnectionState(pc);
     });
 
     pc.addTransceiver("video", { direction: "recvonly" });
@@ -2488,6 +2506,10 @@ const TutorSession = {
       throw new Error("Tutor connection was closed.");
     }
     this.sessionId = String(answer.sessionid);
+    await this._waitForConnectionReady(pc);
+    if (!this._isPeerMediaReady(pc)) {
+      throw new Error("Avatar media became unavailable while connecting.");
+    }
     return this.sessionId;
   },
 
@@ -2533,8 +2555,171 @@ const TutorSession = {
     });
   },
 
-  disconnect() {
+  _waitForConnectionReady(pc) {
+    return new Promise((resolve, reject) => {
+      let timeout;
+      const cleanup = () => {
+        clearTimeout(timeout);
+        pc.removeEventListener("connectionstatechange", checkReady);
+        pc.removeEventListener("track", checkReady);
+      };
+      const fail = (message) => {
+        cleanup();
+        reject(new Error(message));
+      };
+      const checkReady = () => {
+        if (pc !== this.peerConnection || pc.connectionState === "closed") {
+          fail("Tutor connection was closed.");
+          return;
+        }
+        if (pc.connectionState === "failed") {
+          fail("Avatar WebRTC connection failed.");
+          return;
+        }
+        if (this._isPeerMediaReady(pc)) {
+          cleanup();
+          resolve();
+        }
+      };
+
+      timeout = setTimeout(() => {
+        fail("Timed out waiting for the avatar media stream.");
+      }, TUTOR_WEBRTC_READY_TIMEOUT_MS);
+      pc.addEventListener("connectionstatechange", checkReady);
+      pc.addEventListener("track", checkReady);
+      checkReady();
+    });
+  },
+
+  _isPeerMediaReady(pc) {
+    const hasAudio = this.remoteStream
+      ?.getAudioTracks()
+      .some((track) => track.readyState === "live");
+    const hasVideo = this.remoteStream
+      ?.getVideoTracks()
+      .some((track) => track.readyState === "live");
+    return Boolean(
+      pc &&
+      pc === this.peerConnection &&
+      pc.connectionState === "connected" &&
+      hasAudio &&
+      hasVideo
+    );
+  },
+
+  _handlePeerConnectionState(pc) {
+    if (pc !== this.peerConnection) return;
+    if (pc.connectionState === "connected") {
+      this._clearDisconnectedGrace();
+      return;
+    }
+    if (!this.connectionReady) return;
+    if (pc.connectionState === "disconnected") {
+      if (this.disconnectedGraceTimer !== null) return;
+      this.disconnectedGraceTimer = setTimeout(() => {
+        this.disconnectedGraceTimer = null;
+        if (pc === this.peerConnection && pc.connectionState === "disconnected") {
+          this._handleUnexpectedConnectionLoss(pc);
+        }
+      }, TUTOR_WEBRTC_DISCONNECTED_GRACE_MS);
+      return;
+    }
+    if (pc.connectionState === "failed") {
+      this._handleUnexpectedConnectionLoss(pc);
+    }
+  },
+
+  _handleUnexpectedConnectionLoss(pc) {
+    if (pc !== this.peerConnection || !this.connectionReady || this.disconnecting) return;
+    const interruptedLessonId = this.activeLessonId;
+    const shouldRecover = this._canRecover(interruptedLessonId);
+    this.connectionReady = false;
+    this._clearDisconnectedGrace();
+    this.cancelActiveMessage();
+    setTutorConnectionStatus(
+      shouldRecover ? "Avatar connection lost. Reconnecting..." : "Avatar connection lost.",
+      !shouldRecover,
+      { retry: !shouldRecover }
+    );
+    this.disconnect({ preserveRecovery: shouldRecover });
+    if (shouldRecover) this._scheduleRecovery(interruptedLessonId);
+  },
+
+  _canRecover(activeLessonId) {
+    const widget = document.getElementById("tutor-chat-widget");
+    const panel = document.getElementById("tutor-chat-panel");
+    return Boolean(
+      activeLessonId &&
+      lessonId === activeLessonId &&
+      widget &&
+      !widget.classList.contains("hidden") &&
+      panel &&
+      !panel.classList.contains("hidden")
+    );
+  },
+
+  _scheduleRecovery(activeLessonId) {
+    if (!this._canRecover(activeLessonId)) {
+      this._cancelRecovery();
+      return;
+    }
+    if (this.recoveryAttempt >= TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS) {
+      this._cancelRecovery();
+      setTutorConnectionStatus("Could not restore the avatar connection.", true, { retry: true });
+      return;
+    }
+
+    this.recoveryAttempt += 1;
+    const attemptNumber = this.recoveryAttempt;
+    const delay = TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS * (2 ** (attemptNumber - 1));
+    setTutorConnectionStatus(
+      `Reconnecting avatar (${attemptNumber}/${TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS})...`
+    );
+    clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = null;
+      if (!this._canRecover(activeLessonId)) {
+        this._cancelRecovery();
+        return;
+      }
+      this.connect(activeLessonId, { recovery: true })
+        .then(() => {
+          if (!this._canRecover(activeLessonId)) {
+            this.disconnect();
+            return;
+          }
+          setTutorConnectionStatus("");
+        })
+        .catch((err) => {
+          console.debug(`[TutorSession] recovery attempt ${attemptNumber} failed:`, err);
+          this._scheduleRecovery(activeLessonId);
+        });
+    }, delay);
+  },
+
+  _clearDisconnectedGrace() {
+    if (this.disconnectedGraceTimer === null) return;
+    clearTimeout(this.disconnectedGraceTimer);
+    this.disconnectedGraceTimer = null;
+  },
+
+  _cancelRecovery({ resetAttempts = true } = {}) {
+    this._clearDisconnectedGrace();
+    if (this.recoveryTimer !== null) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+    if (resetAttempts) this.recoveryAttempt = 0;
+  },
+
+  cancelRecovery() {
+    this._cancelRecovery();
+  },
+
+  disconnect({ preserveRecovery = false } = {}) {
     resumeTutorAvatarAfterInterrupt({ play: false });
+    this._clearDisconnectedGrace();
+    if (!preserveRecovery) this._cancelRecovery();
     if (this.disconnecting) return Promise.resolve(false);
     this.disconnecting = true;
     const releaseRequest = this._avatarControl("disconnect", { keepalive: true }).catch((err) => {
@@ -2543,6 +2728,7 @@ const TutorSession = {
     });
     this.connectionAttempt += 1;
     this.connectingPromise = null;
+    this.connectionReady = false;
     const videoEl = document.getElementById("tutor-chat-avatar-video");
     try {
       if (videoEl) videoEl.srcObject = null;
@@ -2597,7 +2783,8 @@ const TutorSession = {
     const panel = document.getElementById("tutor-chat-panel");
     const videoEl = document.getElementById("tutor-chat-avatar-video");
     if (!panel || !videoEl) return;
-    videoEl.muted = panel.classList.contains("hidden") || this.speechState !== "speaking";
+    const canSpeak = ["preparing", "speaking"].includes(this.speechState);
+    videoEl.muted = panel.classList.contains("hidden") || !canSpeak;
   },
 
   _stopSpeakingMonitor() {
@@ -2878,7 +3065,7 @@ function appendTutorChatBubble(text, className) {
   return bubble;
 }
 
-function setTutorConnectionStatus(message, isError = false) {
+function setTutorConnectionStatus(message, isError = false, { retry = false } = {}) {
   const messages = document.getElementById("tutor-chat-messages");
   let status = messages.querySelector(".tutor-connection-status");
   if (!message) {
@@ -2888,8 +3075,27 @@ function setTutorConnectionStatus(message, isError = false) {
   if (!status) {
     status = appendTutorChatBubble("", "tutor-chat-bubble-agent tutor-connection-status");
   }
-  status.textContent = message;
+  status.replaceChildren();
+  const label = document.createElement("span");
+  label.textContent = message;
+  status.appendChild(label);
+  if (retry) {
+    const retryButton = document.createElement("button");
+    retryButton.type = "button";
+    retryButton.className = "tutor-connection-retry";
+    retryButton.textContent = "Retry";
+    retryButton.addEventListener("click", retryTutorAvatarConnection);
+    status.appendChild(retryButton);
+  }
   status.classList.toggle("tutor-chat-bubble-error", isError);
+}
+
+function retryTutorAvatarConnection() {
+  const panel = document.getElementById("tutor-chat-panel");
+  if (!lessonId || panel.classList.contains("hidden")) return;
+  setTutorConnectionStatus("Connecting avatar...");
+  TutorSession.disconnect();
+  ensureTutorSessionConnected().catch(() => {});
 }
 
 function ensureTutorSessionConnected() {
@@ -2898,7 +3104,8 @@ function ensureTutorSessionConnected() {
   const isConnected =
     TutorSession.activeLessonId === connectingLessonId &&
     TutorSession.sessionId &&
-    ["new", "connecting", "connected"].includes(TutorSession.peerConnection?.connectionState);
+    TutorSession.connectionReady &&
+    TutorSession.peerConnection?.connectionState === "connected";
 
   if (isConnected) {
     setTutorConnectionStatus("");
@@ -2918,7 +3125,11 @@ function ensureTutorSessionConnected() {
       console.error("[TutorSession] connect failed:", err);
       const widget = document.getElementById("tutor-chat-widget");
       if (!widget.classList.contains("hidden") && lessonId === connectingLessonId) {
-        setTutorConnectionStatus("Could not connect to the avatar service.", true);
+        setTutorConnectionStatus(
+          "Could not connect to the avatar service.",
+          true,
+          { retry: true }
+        );
       }
       throw err;
     });
@@ -2993,10 +3204,12 @@ function setTutorWidgetVisible(visible) {
     loadTutorSTTConfig().catch((err) => {
       console.debug("[TutorSTT] configuration unavailable:", err);
     });
+    if (!panel.classList.contains("hidden")) prepareTutorSTTForGrantedPermission();
     TutorSession._syncAudioMute();
     ensureTutorSessionConnected().catch(() => {});
     return;
   }
+  closeTutorSTTStandby();
   stopTutorMicrophone({ focusInput: false });
   stopTutorActivity();
   panel.classList.add("hidden");
@@ -3107,6 +3320,8 @@ function toggleTutorChat() {
   if (!wasHidden) {
     stopTutorMicrophone({ focusInput: false });
     stopTutorActivity();
+    TutorSession.cancelRecovery();
+    closeTutorSTTStandby();
     panel.classList.add("hidden");
     videoEl.muted = true;
     resumeNarrationAfterTutor();
@@ -3117,6 +3332,7 @@ function toggleTutorChat() {
   TutorSession._syncAudioMute();
   videoEl.play().catch((err) => console.debug("Tutor avatar playback deferred:", err));
   scheduleTutorAvatarSizeUpdate();
+  prepareTutorSTTForGrantedPermission();
   ensureTutorSessionConnected().catch(() => {});
 }
 
@@ -3128,13 +3344,25 @@ let tutorMicrophoneSource = null;
 let tutorMicrophoneAnalyser = null;
 let tutorMicrophoneLevelFrame = null;
 let tutorSTTSession = null;
+let tutorSTTStandbyTransport = null;
+let tutorSTTPrewarmTimer = null;
+let tutorMicrophonePermissionGranted = false;
 let tutorAvatarVisualInterruptId = 0;
 let tutorAvatarVisualInterruptTimer = null;
 
 const TUTOR_STT_WORKLET_URL = "/tutor-stt-worklet.js";
 const TUTOR_STT_MAX_BUFFERED_BYTES = 1024 * 1024;
+const TUTOR_STT_AUTO_SUBMIT_DELAY_MS = 600;
+const TUTOR_STT_MAX_RECORDING_MS = 60 * 1000;
+const TUTOR_STT_MAX_TRANSCRIPT_LENGTH = 2000;
+const TUTOR_STT_GUARD_INTERVAL_MS = 1000;
+const TUTOR_STT_SLEEP_GAP_MS = 10 * 1000;
+const TUTOR_STT_PREWARM_DELAY_MS = 250;
 
-function setTutorRecordingShell(active, { focusInput = true, state = "recording" } = {}) {
+function setTutorRecordingShell(
+  active,
+  { focusInput = true, state = "recording", preserveInput = false } = {}
+) {
   const wasActive = tutorRecordingShellActive;
   tutorRecordingShellActive = active;
   const shell = document.getElementById("tutor-chat-input-shell");
@@ -3147,7 +3375,7 @@ function setTutorRecordingShell(active, { focusInput = true, state = "recording"
   shell.classList.toggle("is-recording", active);
   shell.classList.toggle("is-requesting", active && state === "requesting");
   if (active && !wasActive) input.value = "";
-  if (!active && wasActive) input.value = "";
+  if (!active && wasActive && !preserveInput) input.value = "";
   input.readOnly = active;
   input.placeholder = active
     ? (state === "requesting" ? "Starting microphone..." : "Listening...")
@@ -3228,6 +3456,12 @@ function joinTutorTranscript(left, right) {
     .join(" ");
 }
 
+function limitTutorTranscript(transcript) {
+  return String(transcript || "")
+    .slice(0, TUTOR_STT_MAX_TRANSCRIPT_LENGTH)
+    .trim();
+}
+
 function updateTutorSTTTranscript(session) {
   if (tutorSTTSession !== session || !tutorRecordingShellActive) return;
   const input = document.getElementById("tutor-chat-input");
@@ -3239,10 +3473,91 @@ function updateTutorSTTTranscript(session) {
   label.textContent = transcript ? `Transcription: ${transcript}` : "Listening...";
 }
 
+function cancelTutorSTTAutoSubmit(session) {
+  if (session.autoSubmitTimer === null) return;
+  clearTimeout(session.autoSubmitTimer);
+  session.autoSubmitTimer = null;
+  updateTutorSTTTranscript(session);
+}
+
+function submitTutorSTTTranscript(session) {
+  if (
+    tutorSTTSession !== session
+    || session.stopping
+    || session.submitting
+    || !tutorRecordingShellActive
+  ) return;
+
+  session.autoSubmitTimer = null;
+  const transcript = limitTutorTranscript(
+    joinTutorTranscript(session.finalTranscript, session.interimTranscript)
+  );
+  if (!transcript) {
+    updateTutorSTTTranscript(session);
+    return;
+  }
+
+  session.submitting = true;
+  stopTutorMicrophone({ focusInput: false, preserveTranscript: true });
+  const input = document.getElementById("tutor-chat-input");
+  input.value = transcript;
+  sendTutorChatMessage();
+}
+
+function finishTutorSTTAtLimit(session, message) {
+  if (tutorSTTSession !== session || session.stopping || session.submitting) return;
+  const transcript = limitTutorTranscript(
+    joinTutorTranscript(session.finalTranscript, session.interimTranscript)
+  );
+  if (!transcript) {
+    stopTutorMicrophone();
+    showToast(message);
+    return;
+  }
+
+  session.finalTranscript = transcript;
+  session.interimTranscript = "";
+  updateTutorSTTTranscript(session);
+  showToast(`${message} Sending the current transcript.`);
+  submitTutorSTTTranscript(session);
+}
+
+function startTutorSTTGuards(session) {
+  session.startedAt = Date.now();
+  session.lastGuardAt = session.startedAt;
+  session.guardTimer = setInterval(() => {
+    if (tutorSTTSession !== session || session.stopping) return;
+    const now = Date.now();
+    const gap = now - session.lastGuardAt;
+    session.lastGuardAt = now;
+
+    if (gap > TUTOR_STT_SLEEP_GAP_MS) {
+      stopTutorMicrophone({ focusInput: false });
+      showToast("Voice input was cancelled after the device resumed.");
+      return;
+    }
+    if (now - session.startedAt >= TUTOR_STT_MAX_RECORDING_MS) {
+      finishTutorSTTAtLimit(session, "Voice input reached the 60-second limit.");
+    }
+  }, TUTOR_STT_GUARD_INTERVAL_MS);
+}
+
+function scheduleTutorSTTAutoSubmit(session) {
+  const transcript = joinTutorTranscript(session.finalTranscript, session.interimTranscript);
+  if (!transcript || session.submitting) return;
+  cancelTutorSTTAutoSubmit(session);
+  document.getElementById("tutor-chat-recording-label").textContent =
+    `Sending transcription: ${transcript}`;
+  session.autoSubmitTimer = setTimeout(
+    () => submitTutorSTTTranscript(session),
+    TUTOR_STT_AUTO_SUBMIT_DELAY_MS
+  );
+}
+
 function failTutorSTTSession(session, message) {
   if (tutorSTTSession !== session || session.stopping) return;
   console.error("[TutorSTT] session failed:", message);
-  stopTutorMicrophone();
+  stopTutorMicrophone({ prepareNext: false });
   showToast(message);
 }
 
@@ -3264,20 +3579,171 @@ function handleTutorSTTMessage(session, event) {
     );
     return;
   }
+  if (message.type === "SpeechStarted") {
+    cancelTutorSTTAutoSubmit(session);
+    return;
+  }
   if (message.type !== "Results") return;
 
   const transcript = message.channel?.alternatives?.[0]?.transcript?.trim() || "";
+  if (transcript && !message.speech_final) cancelTutorSTTAutoSubmit(session);
   if (message.is_final) {
-    session.finalTranscript = joinTutorTranscript(session.finalTranscript, transcript);
+    const resultKey = Number.isFinite(message.start) && Number.isFinite(message.duration)
+      ? `${message.start}:${message.duration}`
+      : null;
+    if (transcript && (!resultKey || !session.finalResultKeys.has(resultKey))) {
+      session.finalTranscript = joinTutorTranscript(session.finalTranscript, transcript);
+      if (resultKey) session.finalResultKeys.add(resultKey);
+    }
     session.interimTranscript = "";
   } else {
     session.interimTranscript = transcript;
   }
   updateTutorSTTTranscript(session);
+  const completeTranscript = joinTutorTranscript(
+    session.finalTranscript,
+    session.interimTranscript
+  );
+  if (completeTranscript.length >= TUTOR_STT_MAX_TRANSCRIPT_LENGTH) {
+    session.finalTranscript = limitTutorTranscript(completeTranscript);
+    session.interimTranscript = "";
+    updateTutorSTTTranscript(session);
+    finishTutorSTTAtLimit(session, "Voice input reached the 2,000-character limit.");
+    return;
+  }
+  if (message.speech_final) scheduleTutorSTTAutoSubmit(session);
+}
+
+function createTutorSTTTransport(websocketUrl) {
+  const socket = new WebSocket(websocketUrl);
+  const transport = {
+    websocketUrl,
+    socket,
+    opened: false,
+    ready: null,
+  };
+  transport.ready = new Promise((resolve, reject) => {
+    socket.addEventListener("open", () => {
+      transport.opened = true;
+      resolve();
+    }, { once: true });
+    socket.addEventListener("error", () => {
+      if (!transport.opened) reject(new Error("Could not connect to the speech service."));
+    }, { once: true });
+    socket.addEventListener("close", () => {
+      if (!transport.opened) reject(new Error("The speech service closed the connection."));
+    }, { once: true });
+  });
+  return transport;
+}
+
+function closeTutorSTTStandby() {
+  if (tutorSTTPrewarmTimer !== null) {
+    clearTimeout(tutorSTTPrewarmTimer);
+    tutorSTTPrewarmTimer = null;
+  }
+  const transport = tutorSTTStandbyTransport;
+  tutorSTTStandbyTransport = null;
+  if (!transport || transport.socket.readyState >= WebSocket.CLOSING) return;
+  try { transport.socket.close(1000, "Standby speech input closed"); } catch {}
+}
+
+function canPrewarmTutorSTT() {
+  const widget = document.getElementById("tutor-chat-widget");
+  const panel = document.getElementById("tutor-chat-panel");
+  return Boolean(
+    tutorMicrophonePermissionGranted &&
+    !document.hidden &&
+    widget &&
+    !widget.classList.contains("hidden") &&
+    panel &&
+    !panel.classList.contains("hidden") &&
+    !tutorSTTSession
+  );
+}
+
+async function prewarmTutorSTTConnection() {
+  if (!canPrewarmTutorSTT()) return null;
+  const websocketUrl = await loadTutorSTTConfig();
+  if (!canPrewarmTutorSTT()) return null;
+
+  const current = tutorSTTStandbyTransport;
+  if (
+    current &&
+    current.websocketUrl === websocketUrl &&
+    current.socket.readyState < WebSocket.CLOSING
+  ) {
+    await current.ready;
+    return current;
+  }
+
+  closeTutorSTTStandby();
+  const transport = createTutorSTTTransport(websocketUrl);
+  tutorSTTStandbyTransport = transport;
+  try {
+    await transport.ready;
+    if (tutorSTTStandbyTransport !== transport || !canPrewarmTutorSTT()) {
+      if (tutorSTTStandbyTransport === transport) closeTutorSTTStandby();
+      return null;
+    }
+    return transport;
+  } catch (err) {
+    if (tutorSTTStandbyTransport === transport) tutorSTTStandbyTransport = null;
+    try { transport.socket.close(); } catch {}
+    throw err;
+  }
+}
+
+function scheduleTutorSTTPrewarm(delay = TUTOR_STT_PREWARM_DELAY_MS) {
+  if (!canPrewarmTutorSTT()) return;
+  if (tutorSTTPrewarmTimer !== null) clearTimeout(tutorSTTPrewarmTimer);
+  tutorSTTPrewarmTimer = setTimeout(() => {
+    tutorSTTPrewarmTimer = null;
+    prewarmTutorSTTConnection().catch((err) => {
+      console.debug("[TutorSTT] standby connection unavailable:", err);
+    });
+  }, delay);
+}
+
+async function prepareTutorSTTForGrantedPermission() {
+  if (tutorMicrophonePermissionGranted) {
+    scheduleTutorSTTPrewarm(0);
+    return;
+  }
+  if (!navigator.permissions?.query) return;
+  try {
+    const permission = await navigator.permissions.query({ name: "microphone" });
+    if (permission.state !== "granted") return;
+    tutorMicrophonePermissionGranted = true;
+    scheduleTutorSTTPrewarm(0);
+  } catch (err) {
+    console.debug("[TutorSTT] microphone permission state unavailable:", err);
+  }
+}
+
+function takeTutorSTTTransport(websocketUrl) {
+  const standby = tutorSTTStandbyTransport;
+  tutorSTTStandbyTransport = null;
+  if (
+    standby &&
+    standby.websocketUrl === websocketUrl &&
+    standby.socket.readyState < WebSocket.CLOSING
+  ) {
+    return standby;
+  }
+  if (standby && standby.socket.readyState < WebSocket.CLOSING) {
+    try { standby.socket.close(1000, "Standby speech input replaced"); } catch {}
+  }
+  return createTutorSTTTransport(websocketUrl);
 }
 
 function openTutorSTTSession(websocketUrl, attemptId) {
-  const socket = new WebSocket(websocketUrl);
+  if (tutorSTTPrewarmTimer !== null) {
+    clearTimeout(tutorSTTPrewarmTimer);
+    tutorSTTPrewarmTimer = null;
+  }
+  const transport = takeTutorSTTTransport(websocketUrl);
+  const socket = transport.socket;
   const session = {
     attemptId,
     socket,
@@ -3285,7 +3751,13 @@ function openTutorSTTSession(websocketUrl, attemptId) {
     silentGain: null,
     finalTranscript: "",
     interimTranscript: "",
-    opened: false,
+    finalResultKeys: new Set(),
+    autoSubmitTimer: null,
+    guardTimer: null,
+    startedAt: null,
+    lastGuardAt: null,
+    submitting: false,
+    opened: transport.opened,
     stopping: false,
   };
   tutorSTTSession = session;
@@ -3296,17 +3768,8 @@ function openTutorSTTSession(websocketUrl, attemptId) {
     failTutorSTTSession(session, "The speech service disconnected. Please try again.");
   });
 
-  const opened = new Promise((resolve, reject) => {
-    socket.addEventListener("open", () => {
-      session.opened = true;
-      resolve();
-    }, { once: true });
-    socket.addEventListener("error", () => {
-      if (!session.opened) reject(new Error("Could not connect to the speech service."));
-    }, { once: true });
-    socket.addEventListener("close", () => {
-      if (!session.opened) reject(new Error("The speech service closed the connection."));
-    }, { once: true });
+  const opened = transport.ready.then(() => {
+    session.opened = true;
   });
 
   return { session, opened };
@@ -3425,6 +3888,8 @@ function releaseTutorMicrophoneResources() {
 
   if (sttSession) {
     sttSession.stopping = true;
+    if (sttSession.autoSubmitTimer !== null) clearTimeout(sttSession.autoSubmitTimer);
+    if (sttSession.guardTimer !== null) clearInterval(sttSession.guardTimer);
     sttSession.workletNode?.port.close();
     try { sttSession.workletNode?.disconnect(); } catch {}
     try { sttSession.silentGain?.disconnect(); } catch {}
@@ -3442,10 +3907,13 @@ function releaseTutorMicrophoneResources() {
   recordingLabel.textContent = "Listening...";
 }
 
-function stopTutorMicrophone({ focusInput = true } = {}) {
+function stopTutorMicrophone(
+  { focusInput = true, preserveTranscript = false, prepareNext = true } = {}
+) {
   tutorMicrophoneAttemptId++;
   releaseTutorMicrophoneResources();
-  setTutorRecordingShell(false, { focusInput });
+  setTutorRecordingShell(false, { focusInput, preserveInput: preserveTranscript });
+  if (prepareNext) scheduleTutorSTTPrewarm();
 }
 
 function microphoneErrorMessage(err) {
@@ -3481,6 +3949,8 @@ async function startTutorMicrophone() {
   }
 
   try {
+    const { session, opened } = openTutorSTTSession(TutorSTTConfig.websocketUrl, attemptId);
+    opened.catch(() => {});
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -3490,6 +3960,7 @@ async function startTutorMicrophone() {
       },
       video: false,
     });
+    tutorMicrophonePermissionGranted = true;
 
     if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) {
       stream.getTracks().forEach((track) => track.stop());
@@ -3513,7 +3984,6 @@ async function startTutorMicrophone() {
 
     if (attemptId !== tutorMicrophoneAttemptId || !tutorRecordingShellActive) return;
 
-    const { session, opened } = openTutorSTTSession(TutorSTTConfig.websocketUrl, attemptId);
     await Promise.all([opened, attachTutorSTTAudio(session)]);
     if (
       attemptId !== tutorMicrophoneAttemptId
@@ -3530,11 +4000,12 @@ async function startTutorMicrophone() {
     });
     setTutorRecordingShell(true, { focusInput: false, state: "recording" });
     updateTutorSTTTranscript(session);
+    startTutorSTTGuards(session);
     updateTutorMicrophoneLevel();
   } catch (err) {
     if (attemptId !== tutorMicrophoneAttemptId) return;
     console.error("[TutorMicrophone] start failed:", err);
-    stopTutorMicrophone();
+    stopTutorMicrophone({ prepareNext: false });
     const message = err?.message?.includes("speech service") || err?.message?.includes("AudioWorklet")
       ? err.message
       : microphoneErrorMessage(err);
@@ -3617,8 +4088,17 @@ document.getElementById("tutor-chat-input").addEventListener("keydown", (e) => {
 });
 document.getElementById("tutor-chat-messages").addEventListener("scroll", scheduleTutorAvatarSizeUpdate);
 window.addEventListener("resize", scheduleTutorAvatarSizeUpdate);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    closeTutorSTTStandby();
+    if (tutorRecordingShellActive) stopTutorMicrophone({ focusInput: false });
+    return;
+  }
+  prepareTutorSTTForGrantedPermission();
+});
 window.addEventListener("pagehide", () => {
-  stopTutorMicrophone({ focusInput: false });
+  closeTutorSTTStandby();
+  stopTutorMicrophone({ focusInput: false, prepareNext: false });
   stopTutorActivity();
   TutorSession.disconnect();
 });
