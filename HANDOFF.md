@@ -76,6 +76,22 @@ Keep the tutor repository on `main` so it can receive normal application updates
 
 ## 2. Install The LiveTalking Assets
 
+Create a dedicated staging directory and place both downloaded files there:
+
+```bash
+mkdir -p ~/kneron-handoff-assets
+```
+
+The directory must contain:
+
+```text
+~/kneron-handoff-assets/
+├── livetalking-assets-v1.tar.gz
+└── livetalking-assets-v1.sha256
+```
+
+In the commands below, use `~/kneron-handoff-assets` wherever `/path/to/downloaded-assets` appears.
+
 Put both downloaded asset files in the same directory and verify the archive before extracting it:
 
 ```bash
@@ -323,6 +339,60 @@ git -C ../WhisperLiveKit submodule update --init --recursive
 | `8000` | Manim agent | Docker Compose |
 | `8002` | WhisperLiveKit | Docker Compose |
 | `8010` | LiveTalking | Local Python process |
+
+## Condensed First-Time Command Sequence
+
+The following is the command-only version of the first-time setup. It assumes the two LiveTalking asset files have been placed in `~/kneron-handoff-assets` and the real environment values are available through the private handoff channel.
+
+```bash
+cd ~
+mkdir kneron-tutor
+cd kneron-tutor
+
+git clone --branch main https://github.com/zecila/kneron_ai_tutoring.git kneron_project
+git clone --branch kneron-handoff-v1 https://github.com/zecila/LiveTalking.git LiveTalking
+git clone https://github.com/QuentinFuxa/WhisperLiveKit.git WhisperLiveKit
+git -C WhisperLiveKit checkout ed571b69099d089a04f15b7690bbcae6aa2cc54b
+git -C WhisperLiveKit submodule update --init --recursive
+
+cd ~/kneron-handoff-assets
+sha256sum -c livetalking-assets-v1.sha256
+tar -xzf livetalking-assets-v1.tar.gz -C ~/kneron-tutor/LiveTalking
+test -f ~/kneron-tutor/LiveTalking/models/wav2lip.pth
+test -f ~/kneron-tutor/LiveTalking/data/avatars/tutor_avatar_v3/coords.pkl
+
+cd ~/kneron-tutor/LiveTalking
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
+deactivate
+
+cd ~/kneron-tutor/kneron_project
+./scripts/setup-local.sh
+nano .env
+./scripts/setup-local.sh
+```
+
+After setup reports that all prerequisites are ready, start LiveTalking in terminal 1:
+
+```bash
+cd ~/kneron-tutor/LiveTalking
+source .venv/bin/activate
+python app.py --transport webrtc --model wav2lip --avatar_id tutor_avatar_v3
+```
+
+Start the Compose services in terminal 2:
+
+```bash
+cd ~/kneron-tutor/kneron_project
+docker compose up -d --build
+docker compose ps
+curl -fsS http://127.0.0.1:8002/health
+```
+
+Open <http://localhost:5000> and complete the verification workflow in [Open And Verify The Tutor](#7-open-and-verify-the-tutor).
 
 ## Final Acceptance Checklist
 
