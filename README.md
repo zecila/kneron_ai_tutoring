@@ -200,3 +200,10 @@ kneron_project/
 **The tutor avatar doesn't connect or speak.** Start the pinned LiveTalking checkout with `tutor_avatar_v3`, then verify it is listening on port `8010`. Run `./scripts/setup-local.sh` to check the fork integration, Wav2Lip model, and avatar assets. Also confirm that the configured TTS service is reachable from the backend container.
 
 **The microphone does not transcribe.** Confirm `whisperlivekit` is healthy, open the application from an origin allowed by `WHISPER_CORS_ORIGINS`, and check that `STT_WEBSOCKET_URL` uses a browser-reachable `ws://` or `wss://` address rather than a Compose service name.
+
+## Acknowledgements
+
+- [LiveTalking](https://github.com/lipku/LiveTalking) provides the real-time, lip-synchronized avatar foundation. This project uses a pinned integration fork containing tutor-specific changes.
+- [WhisperLiveKit](https://github.com/QuentinFuxa/WhisperLiveKit) provides the real-time streaming speech-to-text service used for tutor microphone input.
+
+Both projects remain subject to their respective licenses. Thank you to their authors and contributors for making this integration possible.
