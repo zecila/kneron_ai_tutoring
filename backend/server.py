@@ -225,6 +225,9 @@ def whoami():
     conn = get_db()
     row = conn.execute("SELECT email, role, first_name, last_name, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
     conn.close()
+    if not row:
+        session.pop("user_id", None)
+        return jsonify({"logged_in": False})
     return jsonify({
         "logged_in": True, "email": row["email"], "role": row["role"],
         "first_name": row["first_name"], "last_name": row["last_name"],
@@ -1598,15 +1601,18 @@ def delete_account():
     if not user_id:
         return jsonify({"error": "Not logged in"}), 401
 
-    # remove lesson folders from disk before the DB rows disappear —
-    # once delete_user runs we lose the list of which lessons were theirs
+    # Capture folder IDs first, but only remove files after the database
+    # transaction succeeds. A database error must not destroy lesson files.
     import shutil
-    for lid in get_lesson_ids_for_user(user_id):
+    lesson_ids = get_lesson_ids_for_user(user_id)
+    delete_user(user_id)
+    for lid in lesson_ids:
         folder = lesson_dir(lid)
         if os.path.isdir(folder):
-            shutil.rmtree(folder)
-
-    delete_user(user_id)
+            try:
+                shutil.rmtree(folder)
+            except OSError as exc:
+                app.logger.error("Could not remove lesson folder %s after account deletion: %s", lid, exc)
     session.pop("user_id", None)
     session.pop("session_id", None)  # fresh anonymous identity too, so nothing lingers in this browser session
     return jsonify({"ok": True})

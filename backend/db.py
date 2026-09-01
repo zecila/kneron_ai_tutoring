@@ -634,16 +634,58 @@ def get_lesson_ids_for_user(user_id):
     return [r["lesson_id"] for r in rows]
 
 def delete_user(user_id):
-    """Deletes the user row and every row elsewhere keyed to it. Lesson
-    folders on disk aren't touched here — the caller (server.py) removes
-    those, since db.py doesn't know about the filesystem layout."""
+    """Delete an account and all database rows it owns in one transaction.
+
+    Lesson folders on disk aren't touched here; the caller removes them after
+    this transaction succeeds.
+    """
     conn = get_db()
-    conn.execute("DELETE FROM quiz_attempts WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM lesson_progress WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM lessons WHERE user_id = ?", (user_id,))
-    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        owned_lessons = "SELECT lesson_id FROM lessons WHERE user_id = ?"
+        owned_classes = "SELECT id FROM classes WHERE teacher_id = ?"
+
+        # Assignments reference both classes and lessons, so they must go
+        # before either owner row. This also covers an inconsistent legacy row
+        # whose teacher/class/lesson ownership does not all agree.
+        conn.execute(
+            f"""DELETE FROM assignments
+                WHERE teacher_id = ?
+                   OR class_id IN ({owned_classes})
+                   OR lesson_id IN ({owned_lessons})""",
+            (user_id, user_id, user_id),
+        )
+
+        # Removing an owned lesson removes every learner's activity for that
+        # lesson. Removing a student account also removes their activity on
+        # lessons owned by somebody else.
+        for table in ("quiz_attempts", "lesson_progress", "saved_items"):
+            conn.execute(
+                f"DELETE FROM {table} WHERE user_id = ? OR lesson_id IN ({owned_lessons})",
+                (user_id, user_id),
+            )
+        conn.execute(
+            f"DELETE FROM quiz_questions WHERE lesson_id IN ({owned_lessons})",
+            (user_id,),
+        )
+
+        conn.execute(
+            f"DELETE FROM join_codes WHERE class_id IN ({owned_classes})",
+            (user_id,),
+        )
+        conn.execute(
+            f"DELETE FROM enrollments WHERE student_id = ? OR class_id IN ({owned_classes})",
+            (user_id, user_id),
+        )
+        conn.execute("DELETE FROM password_resets WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM lessons WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM classes WHERE teacher_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_quiz_question(question_id):
