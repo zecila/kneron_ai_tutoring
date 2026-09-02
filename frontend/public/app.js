@@ -8,6 +8,7 @@ let isAnimating = false;
 let lessonId = new URLSearchParams(window.location.search).get("lesson");
 let curriculum = null;
 let progressSaveTimer = null;
+let pendingProgressSave = null;
 let activeConceptId = null;
 let lastScene = "slideshow";
 
@@ -281,6 +282,7 @@ function initAuthForm() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Something went wrong");
 
+      resetQuizContext();
       currentUser = { email: data.email, role: data.role };
       renderAuthButton();
       applyRoleNav();
@@ -430,6 +432,7 @@ async function loadAccountPage() {
 
 async function logout() {
   await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+  resetQuizContext();
   currentUser = null;
   stopNarrationFully();
   document.getElementById("auth-form")?.reset();
@@ -739,6 +742,7 @@ async function generateAssignment() {
     const data = await uploadRes.json();
     if (!uploadRes.ok) throw new Error(data.error || "Upload failed");
 
+    resetQuizContext();
     lessonId = data.lesson_id;
     activeAssignmentId = data.assignment_id;
     history.replaceState(null, "", `?lesson=${lessonId}`);
@@ -800,6 +804,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 });
 
 function enterLesson(id) {
+  if (lessonId && lessonId !== id) flushProgress(true);
+  if (lessonId !== id) resetQuizContext();
   lessonId = id;
   document.getElementById("class-detail-screen").classList.add("hidden");
   document.getElementById("tutor-chat-messages").innerHTML = "";
@@ -848,7 +854,10 @@ async function loadSlideshow(justGenerated = false) {
     buildDotNav();
     const progRes = await fetch(`/api/lessons/${lessonId}/progress`); //check for saved position
     const prog = progRes.ok ? await progRes.json() : {};
-    const startSlide = prog.last_viewed_slide != null ? prog.last_viewed_slide : 0; 
+    const savedSlide = Number(prog.last_viewed_slide);
+    const startSlide = prog.last_viewed_slide != null && Number.isInteger(savedSlide)
+      ? Math.min(Math.max(savedSlide, 0), Math.max(slides.length - 1, 0))
+      : 0;
 
     document.getElementById("tts-mute-btn").onclick = () => {
       const muteBtn = document.getElementById("tts-mute-btn");
@@ -1066,6 +1075,7 @@ async function confirmDeleteModal() {
     try {
       const res = await fetch("/api/auth/delete-account", { method: "POST" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      resetQuizContext();
       currentUser = null;
       renderAuthButton();
       showWelcome();
@@ -1184,6 +1194,7 @@ async function generateLesson() {
     const uploadRes = await fetch("/api/lessons", { method: "POST", body: form });
     const data = await uploadRes.json();
     if (!uploadRes.ok) throw new Error(data.error || "Upload failed");
+    resetQuizContext();
     lessonId = data.lesson_id;
     if (currentUser?.role === "teacher") teacherTrialLessonId = lessonId;
 
@@ -1553,6 +1564,8 @@ function guardTrialLesson(action) {
 
 function doGoHome() {
   document.getElementById("home-modal").classList.add("hidden");
+  flushProgress(true);
+  resetQuizContext();
   stopNarrationFully();
   discardTrialLesson();
   lessonId = null;
@@ -4097,6 +4110,7 @@ document.addEventListener("visibilitychange", () => {
   prepareTutorSTTForGrantedPermission();
 });
 window.addEventListener("pagehide", () => {
+  flushProgress(true);
   closeTutorSTTStandby();
   stopTutorMicrophone({ focusInput: false, prepareNext: false });
   stopTutorActivity();
@@ -4213,13 +4227,30 @@ function handleKeyboard(e) {
 
 function saveProgress(index, completed) {
   clearTimeout(progressSaveTimer);
+  if (!lessonId) return;
+  pendingProgressSave = { lessonId, index, completed };
   progressSaveTimer = setTimeout(() => {
-    fetch(`/api/lessons/${lessonId}/progress`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ last_viewed_slide: index, completed })
-    }).catch(err => console.warn("Could not save progress:", err.message));
+    progressSaveTimer = null;
+    flushProgress();
   }, 500);
+}
+
+function flushProgress(keepalive = false) {
+  clearTimeout(progressSaveTimer);
+  progressSaveTimer = null;
+  const progress = pendingProgressSave;
+  pendingProgressSave = null;
+  if (!progress) return;
+
+  fetch(`/api/lessons/${progress.lessonId}/progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      last_viewed_slide: progress.index,
+      completed: progress.completed
+    }),
+    keepalive
+  }).catch(err => console.warn("Could not save progress:", err.message));
 }
 
 // ─── Chrome updates ───────────────────────────────────────────────────────────
@@ -5534,6 +5565,21 @@ function buildAllConcept() {
 const quizQuestionsCache = new Map(); // concept_id -> questions array
 const quizAttemptLimits = new Map();  // concept_id -> { max_attempts, attempts_used }
 
+function resetQuizContext() {
+  quizQuestionsCache.clear();
+  quizAttemptLimits.clear();
+  quizState.clear();
+}
+
+async function requestConceptQuiz(conceptId) {
+  const res = await fetch(`/api/lessons/${lessonId}/concepts/${conceptId}/quiz`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Could not load quiz questions");
+  const questions = data.questions || [];
+  quizAttemptLimits.set(conceptId, { maxAttempts: data.max_attempts, attemptsUsed: data.attempts_used });
+  return questions;
+}
+
 async function fetchQuizQuestions(conceptId) {
   if (conceptId === "__saved__") {
     return Array.from(savedQuizContent, ([id, q]) => ({ ...q, _savedId: id }));
@@ -5546,10 +5592,7 @@ async function fetchQuizQuestions(conceptId) {
     );
     questions = perConcept.flat();
   } else {
-    const res = await fetch(`/api/lessons/${lessonId}/concepts/${conceptId}/quiz`);
-    const data = await res.json();
-    questions = data.questions;
-    quizAttemptLimits.set(conceptId, { maxAttempts: data.max_attempts, attemptsUsed: data.attempts_used });
+    questions = await requestConceptQuiz(conceptId);
   }
   quizQuestionsCache.set(conceptId, questions);
   return questions;
@@ -5557,6 +5600,55 @@ async function fetchQuizQuestions(conceptId) {
 
 function invalidateQuizCache(conceptId) {
   quizQuestionsCache.delete(conceptId);
+}
+
+function quizQuestionSignature(questions) {
+  return questions.map(q => q.question_id).sort().join("|");
+}
+
+async function waitForRegeneratedQuiz(conceptId, previousQuestions, regeneratingConceptIds) {
+  const previousByConcept = new Map();
+  previousQuestions.forEach(question => {
+    const questions = previousByConcept.get(question.concept_id) || [];
+    questions.push(question);
+    previousByConcept.set(question.concept_id, questions);
+  });
+
+  const deadline = Date.now() + 60000;
+  while (Date.now() < deadline) {
+    const refreshed = await Promise.all(
+      regeneratingConceptIds.map(async id => [id, await requestConceptQuiz(id)])
+    );
+    const allReady = refreshed.every(([id, questions]) =>
+      questions.length > 0 &&
+      quizQuestionSignature(questions) !== quizQuestionSignature(previousByConcept.get(id) || [])
+    );
+
+    if (allReady) {
+      refreshed.forEach(([id, questions]) => quizQuestionsCache.set(id, questions));
+      invalidateQuizCache("__all__");
+      if (conceptId === "__all__") return fetchQuizQuestions("__all__");
+      return refreshed.find(([id]) => id === conceptId)?.[1] || [];
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw new Error("New quiz questions were not ready in time");
+}
+
+function preloadRegeneratedQuiz(conceptId, previousQuestions, submissionPromise) {
+  return submissionPromise
+    .then(async submission => {
+      const regeneratingIds = submission?.regenerating_concept_ids || [];
+      if (!regeneratingIds.length) throw new Error("Quiz regeneration did not start");
+      return waitForRegeneratedQuiz(conceptId, previousQuestions, regeneratingIds);
+    })
+    .then(
+      questions => ({ questions, error: null }),
+      error => {
+        console.warn("Could not preload a new quiz:", error.message);
+        return { questions: null, error };
+      },
+    );
 }
 
 function renderStudyPanel(concept, mode, panel) {
@@ -5788,42 +5880,48 @@ function startQuiz(concept, questions, panel, state) {
     qRow.appendChild(bookmark);
     panel.appendChild(qRow);
 
-    // ── Submit row ──
-    const submitRow = document.createElement("div");
-    submitRow.className = "quiz-submit-row";
+    // Saved questions are a free-form review drill. Only regular quizzes have
+    // a batch submission state and trigger regeneration.
+    let submitRow = null;
+    if (!isReviewOnly) {
+      submitRow = document.createElement("div");
+      submitRow.className = "quiz-submit-row";
 
-    const submitBtn = document.createElement("button");
-    submitBtn.className = "quiz-submit-btn";
-    submitBtn.textContent = "Submit Quiz";
-    submitBtn.onclick = () => {
-      state.completed = true;
-      state.questions = questions;   // persist so results can be re-rendered later without re-fetching
-      const isReview = conceptId === "__saved__";
-      submitQuizBatch(concept, questions, state, isReview);
-      // "All concepts" merges several real concepts' questions — invalidate each
-      // one's cache (its batch is being regenerated server-side) plus the
-      // aggregate itself, so nothing here re-serves a stale merged batch either.
-      // Saved-section submissions don't trigger regeneration server-side at all,
-      // so there's no cache to invalidate.
-      if (!isReview) {
+      const submitBtn = document.createElement("button");
+      submitBtn.className = "quiz-submit-btn";
+      submitBtn.textContent = "Submit Quiz";
+      submitBtn.onclick = () => {
+        state.completed = true;
+        state.questions = questions;   // persist so results can be re-rendered later without re-fetching
+        state.submissionPromise = submitQuizBatch(concept, questions, state);
+        // Start loading the regenerated batch behind the results screen. Retry
+        // only reveals it; if generation is still running, it waits on this promise.
+        state.preloadedQuizPromise = preloadRegeneratedQuiz(
+          conceptId,
+          questions,
+          state.submissionPromise,
+        );
+        // "All concepts" merges several real concepts' questions, so invalidate
+        // each concept cache plus the aggregate while replacements are generated.
         const touchedConceptIds = conceptId === "__all__"
           ? [...new Set(questions.map(q => q.concept_id))]
           : [conceptId];
         touchedConceptIds.forEach(invalidateQuizCache);
         invalidateQuizCache("__all__");
-      }
-      renderQuizResults(concept, panel, state, questions);
-    };
-    submitRow.appendChild(submitBtn);
+        renderQuizResults(concept, panel, state, questions);
+      };
+      submitRow.appendChild(submitBtn);
+    }
 
     const updateSubmitBtn = () => {
+      if (!submitRow) return;
       const allAnswered = state.answers.size === questions.length;
       submitRow.classList.toggle("hidden", !allAnswered);
     };
 
     // ── Answer controls ──
     const savedAnswer = state.answers.get(q.question_id);
-    const alreadyRevealed = isReviewOnly && savedAnswer !== undefined;
+    const hasReviewAnswer = isReviewOnly && savedAnswer !== undefined;
 
     const feedback = document.createElement("div");
     feedback.className = "quiz-review-feedback";
@@ -5867,7 +5965,6 @@ function startQuiz(concept, questions, panel, state) {
       allBtns.forEach(b => b.classList.remove("choice-selected"));
       btn.classList.add("choice-selected");
       if (isReviewOnly) {
-        allBtns.forEach(b => b.disabled = true); // lock in the pick, this isn't a re-answerable drill
         showFeedback(chosen);
       } else {
         updateSubmitBtn();
@@ -5882,7 +5979,6 @@ function startQuiz(concept, questions, panel, state) {
         btn.textContent = choice;
         btn.dataset.choice = choice;
         if (choice === savedAnswer) btn.classList.add("choice-selected");
-        if (alreadyRevealed) btn.disabled = true;
         btn.onclick = () => handleSelect(choice, btn, btns);
         panel.appendChild(btn);
         btns.push(btn);
@@ -5890,7 +5986,7 @@ function startQuiz(concept, questions, panel, state) {
     };
 
     buildChoiceButtons(q.choices);
-    if (alreadyRevealed) showFeedback(savedAnswer);
+    if (hasReviewAnswer) showFeedback(savedAnswer);
     panel.appendChild(feedback);
 
     // ── Nav ──
@@ -5912,7 +6008,7 @@ function startQuiz(concept, questions, panel, state) {
     nav.appendChild(prevBtn);
     nav.appendChild(nextBtn);
     panel.appendChild(nav);
-    if (!isReviewOnly) panel.appendChild(submitRow);
+    if (submitRow) panel.appendChild(submitRow);
 
     updateSubmitBtn();
   };
@@ -6018,18 +6114,26 @@ function sectionHeading(text) {
   return h;
 }
 
-function submitQuizBatch(concept, questions, state, isReview = false) {
+async function submitQuizBatch(concept, questions, state, isReview = false) {
   const attempts = questions.map(q => ({
     question_id: q.question_id,
     answer_given: state.answers.get(q.question_id) ?? null
   }));
-  if (!attempts.length) return;
+  if (!attempts.length) return null;
 
-  fetch(`/api/lessons/${lessonId}/quiz-attempt-batch`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ attempts, review: isReview })
-  }).catch(err => console.warn("Could not save quiz attempt:", err.message));
+  try {
+    const res = await fetch(`/api/lessons/${lessonId}/quiz-attempt-batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attempts, review: isReview })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not save quiz attempt");
+    return data;
+  } catch (err) {
+    console.warn("Could not save quiz attempt:", err.message);
+    return null;
+  }
 }
 
 function renderQuizResults(concept, panel, state, questions, readOnly = false) {
@@ -6125,9 +6229,28 @@ function renderQuizResults(concept, panel, state, questions, readOnly = false) {
     retryBtn.className = "card-btn";
     retryBtn.textContent = "Retry Quiz";
     retryBtn.disabled = outOfAttempts;
-    retryBtn.onclick = () => {
-      resetQuizState(concept.concept_id);
-      renderStudyPanel(concept, "quiz", panel);
+    retryBtn.onclick = async () => {
+      if (concept.concept_id === "__saved__") {
+        resetQuizState(concept.concept_id);
+        renderStudyPanel(concept, "quiz", panel);
+        return;
+      }
+
+      retryBtn.disabled = true;
+      retryBtn.textContent = "Preparing new quiz...";
+      try {
+        const preloaded = await state.preloadedQuizPromise;
+        if (!preloaded?.questions?.length) {
+          throw preloaded?.error || new Error("New quiz questions are unavailable");
+        }
+        resetQuizState(concept.concept_id);
+        startQuiz(concept, preloaded.questions, panel, getQuizState(concept.concept_id));
+      } catch (err) {
+        console.warn("Could not prepare a new quiz:", err.message);
+        showToast("Could not prepare a new quiz. Try again.");
+        retryBtn.disabled = false;
+        retryBtn.textContent = "Retry Quiz";
+      }
     };
     panel.appendChild(retryBtn);
   }

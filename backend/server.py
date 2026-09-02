@@ -36,8 +36,8 @@ from db import (
     get_lesson_progress, create_user, get_user_by_email, claim_session, 
     create_lesson_owner, get_lessons_for_owner, owns_lesson, resolve_lesson_access,
     get_db, update_user_password, owns_lesson, get_db, delete_lesson,
-    delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions, 
-    delete_quiz_questions_for_lesson, get_attempt_count, get_max_batch, deactivate_batch, 
+    delete_user, get_lesson_ids_for_user, get_quiz_question, insert_quiz_questions,
+    replace_active_quiz_questions, delete_quiz_questions_for_lesson, get_attempt_count,
     get_active_quiz_questions, save_item, unsave_item, get_saved_items, update_user_name,
     create_password_reset, get_valid_reset, consume_reset_token, 
     create_class, archive_class, get_classes_for_teacher, get_classes_for_student,
@@ -764,7 +764,7 @@ def retry_lesson(lesson_id):
     enqueue_job(lesson_id, file_path, meta.get("source_filename", ""), resume_from=failed_stage, priority=0)
     return jsonify({"status": "retrying"}), 202
 
-def _regenerate_quiz_batch(lesson_id, concept_id):
+def _regenerate_quiz_batch(lesson_id, concept_id, user_id=None, attempt_number=None):
     try:
         with open(lesson_path(lesson_id, "extracted_concepts.json"), "r", encoding="utf-8") as f:
             curriculum = json.load(f)
@@ -772,16 +772,36 @@ def _regenerate_quiz_batch(lesson_id, concept_id):
             c for c in curriculum["curriculum_graph"]["concepts"] if c["concept_id"] == concept_id
         )
         questions = generate_quiz_batch(
-            concept["name"], concept["description"], concept["study"]["key_terms"],
+            concept["name"], concept["description"], concept["study"],
             lesson_id, concept_id
         )
-        next_batch = get_max_batch(lesson_id, concept_id) + 1
-        insert_quiz_questions(lesson_id, concept_id, questions, generation_batch=next_batch)
-        deactivate_batch(lesson_id, concept_id, next_batch - 1)
-    except Exception as e:
-        traceback.print_exc()
+        next_batch = replace_active_quiz_questions(
+            lesson_id,
+            concept_id,
+            questions,
+            user_id=user_id,
+            attempt_number=attempt_number,
+        )
+        app.logger.info(
+            "Regenerated quiz batch %s for lesson %s concept %s user %s",
+            next_batch, lesson_id, concept_id, user_id,
+        )
+    except Exception:
+        app.logger.exception(
+            "Quiz regeneration failed for lesson %s concept %s",
+            lesson_id, concept_id,
+        )
         # regen failure just means the student keeps seeing the batch they
         # already took — not ideal, but no route is left in a broken state
+
+
+def _start_quiz_regeneration(lesson_id, concept_id, user_id=None, attempt_number=None):
+    threading.Thread(
+        target=_regenerate_quiz_batch,
+        args=(lesson_id, concept_id, user_id, attempt_number),
+        daemon=True,
+        name=f"quiz-regeneration-{lesson_id}-{concept_id}",
+    ).start()
 
 
 @app.route("/api/lessons/<lesson_id>/quiz-attempt-batch", methods=["POST"])
@@ -802,6 +822,7 @@ def submit_quiz_batch(lesson_id):
 
     batch_timestamp = datetime.now(timezone.utc).isoformat()
     touched_concept_ids = set()
+    regenerate_concept_ids = set()
     next_attempt_number = {}   # concept_id -> attempt number for this batch
     exhausted_concept_ids = set()   # concepts skipped this batch because limit was already hit
     for a in body["attempts"]:
@@ -814,7 +835,11 @@ def submit_quiz_batch(lesson_id):
         is_correct = str(answer_given).strip().lower() == str(correct_answer).strip().lower()
         touched_concept_ids.add(concept_id)
 
-        if is_review or is_owner_testing:
+        if is_review:
+            continue
+
+        if is_owner_testing:
+            regenerate_concept_ids.add(concept_id)
             continue
 
         if concept_id in exhausted_concept_ids:
@@ -834,11 +859,24 @@ def submit_quiz_batch(lesson_id):
             explanation=question["explanation"], is_correct=is_correct,
             submitted_at=batch_timestamp, attempt_number=next_attempt_number[concept_id],
         )
+        regenerate_concept_ids.add(concept_id)
+
+    for concept_id in sorted(regenerate_concept_ids):
+        if is_owner_testing:
+            _start_quiz_regeneration(lesson_id, concept_id)
+        else:
+            _start_quiz_regeneration(
+                lesson_id,
+                concept_id,
+                user_id=user_id,
+                attempt_number=next_attempt_number[concept_id],
+            )
 
     return jsonify({
         "ok": True,
-        "touched_concept_ids": list(touched_concept_ids),
-        "exhausted_concept_ids": list(exhausted_concept_ids),
+        "touched_concept_ids": sorted(touched_concept_ids),
+        "exhausted_concept_ids": sorted(exhausted_concept_ids),
+        "regenerating_concept_ids": sorted(regenerate_concept_ids),
     })
 
 
@@ -848,7 +886,8 @@ def get_concept_quiz(lesson_id, concept_id):
     access = resolve_lesson_access(lesson_id, user_id, session_id)
     if not access:
         return jsonify({"error": "Lesson not found"}), 404
-    questions = get_active_quiz_questions(lesson_id, concept_id)
+    quiz_user_id = user_id if access["role"] == "student" else None
+    questions = get_active_quiz_questions(lesson_id, concept_id, user_id=quiz_user_id)
     for q in questions:
         q["choices"] = json.loads(q["choices"]) if q["choices"] else None
 
@@ -1352,7 +1391,7 @@ def _run_pipeline(lesson_id: str, file_path: str, original_filename: str, resume
             curriculum = run_curriculum_extraction(normalized, lesson_id)
             for concept in curriculum["curriculum_graph"]["concepts"]:
                 questions = generate_quiz_batch(
-                    concept["name"], concept["description"], concept["study"]["key_terms"],
+                    concept["name"], concept["description"], concept["study"],
                     lesson_id, concept["concept_id"]
                 )
                 insert_quiz_questions(lesson_id, concept["concept_id"], questions, generation_batch=0)

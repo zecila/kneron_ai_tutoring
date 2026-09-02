@@ -132,6 +132,16 @@ def init_db():
                     submitted_at    TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS student_quiz_batches (
+            user_id             INTEGER NOT NULL REFERENCES users(id),
+            lesson_id           TEXT NOT NULL,
+            concept_id          TEXT NOT NULL,
+            generation_batch    INTEGER NOT NULL,
+            attempt_number      INTEGER NOT NULL,
+            updated_at          TEXT NOT NULL,
+            PRIMARY KEY (user_id, lesson_id, concept_id)
+        );
+
         CREATE TABLE IF NOT EXISTS saved_items (
             session_id      TEXT NOT NULL,
             user_id         INTEGER REFERENCES users(id),
@@ -151,6 +161,30 @@ def init_db():
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if "user_id" not in cols:
             _add_column_if_missing(conn, table, "user_id", "INTEGER REFERENCES users(id)")
+
+    # Signed-in progress belongs to the account, not to the browser session.
+    # Keep the newest legacy row before enforcing that invariant.
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute(
+        """DELETE FROM lesson_progress AS older
+           WHERE older.user_id IS NOT NULL
+             AND EXISTS (
+                 SELECT 1
+                 FROM lesson_progress AS newer
+                 WHERE newer.user_id = older.user_id
+                   AND newer.lesson_id = older.lesson_id
+                   AND (
+                       newer.updated_at > older.updated_at
+                       OR (newer.updated_at = older.updated_at AND newer.rowid > older.rowid)
+                   )
+             )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_lesson_progress_user_lesson
+           ON lesson_progress(user_id, lesson_id)
+           WHERE user_id IS NOT NULL"""
+    )
+    conn.commit()
 
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(quiz_attempts)").fetchall()}
     if "question_id" not in cols:
@@ -268,12 +302,50 @@ def claim_session(session_id, user_id):
     new account. Idempotent: only touches rows not already claimed, so
     calling it twice (e.g. a retried request) is harmless."""
     conn = get_db()
-    conn.execute("UPDATE quiz_attempts SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
-    conn.execute("UPDATE lesson_progress SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
-    conn.execute("UPDATE lessons SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
-    conn.execute("UPDATE saved_items SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        anonymous_progress = conn.execute(
+            """SELECT rowid, * FROM lesson_progress
+               WHERE session_id = ? AND user_id IS NULL""",
+            (session_id,),
+        ).fetchall()
+        for progress in anonymous_progress:
+            account_progress = conn.execute(
+                """SELECT rowid, * FROM lesson_progress
+                   WHERE user_id = ? AND lesson_id = ?
+                   ORDER BY updated_at DESC, rowid DESC
+                   LIMIT 1""",
+                (user_id, progress["lesson_id"]),
+            ).fetchone()
+            if account_progress:
+                if progress["updated_at"] >= account_progress["updated_at"]:
+                    conn.execute(
+                        """UPDATE lesson_progress
+                           SET last_viewed_slide = ?, completed = ?, updated_at = ?
+                           WHERE rowid = ?""",
+                        (
+                            progress["last_viewed_slide"],
+                            progress["completed"],
+                            progress["updated_at"],
+                            account_progress["rowid"],
+                        ),
+                    )
+                conn.execute("DELETE FROM lesson_progress WHERE rowid = ?", (progress["rowid"],))
+            else:
+                conn.execute(
+                    "UPDATE lesson_progress SET user_id = ? WHERE rowid = ?",
+                    (user_id, progress["rowid"]),
+                )
+
+        conn.execute("UPDATE quiz_attempts SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
+        conn.execute("UPDATE lessons SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
+        conn.execute("UPDATE saved_items SET user_id = ? WHERE session_id = ? AND user_id IS NULL", (user_id, session_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 
@@ -583,6 +655,7 @@ def owns_lesson(lesson_id, user_id=None, session_id=None):
 
 def delete_lesson(lesson_id, preserve_history=False):
     conn = get_db()
+    conn.execute("DELETE FROM student_quiz_batches WHERE lesson_id = ?", (lesson_id,))
     conn.execute("DELETE FROM lessons WHERE lesson_id = ?", (lesson_id,))
     if not preserve_history:
         conn.execute("DELETE FROM quiz_attempts WHERE lesson_id = ?", (lesson_id,))
@@ -658,7 +731,7 @@ def delete_user(user_id):
         # Removing an owned lesson removes every learner's activity for that
         # lesson. Removing a student account also removes their activity on
         # lessons owned by somebody else.
-        for table in ("quiz_attempts", "lesson_progress", "saved_items"):
+        for table in ("quiz_attempts", "lesson_progress", "saved_items", "student_quiz_batches"):
             conn.execute(
                 f"DELETE FROM {table} WHERE user_id = ? OR lesson_id IN ({owned_lessons})",
                 (user_id, user_id),
@@ -695,12 +768,32 @@ def get_quiz_question(question_id):
     return dict(row) if row else None
 
 
-def get_active_quiz_questions(lesson_id, concept_id):
+def get_active_quiz_questions(lesson_id, concept_id, user_id=None):
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM quiz_questions WHERE lesson_id = ? AND concept_id = ? AND active = 1 ORDER BY question_id",
-        (lesson_id, concept_id)
-    ).fetchall()
+    generation_batch = None
+    if user_id is not None:
+        selection = conn.execute(
+            """SELECT generation_batch FROM student_quiz_batches
+               WHERE user_id = ? AND lesson_id = ? AND concept_id = ?""",
+            (user_id, lesson_id, concept_id),
+        ).fetchone()
+        if selection:
+            generation_batch = selection["generation_batch"]
+
+    if generation_batch is None:
+        rows = conn.execute(
+            """SELECT * FROM quiz_questions
+               WHERE lesson_id = ? AND concept_id = ? AND active = 1
+               ORDER BY question_id""",
+            (lesson_id, concept_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT * FROM quiz_questions
+               WHERE lesson_id = ? AND concept_id = ? AND generation_batch = ?
+               ORDER BY question_id""",
+            (lesson_id, concept_id, generation_batch),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -715,7 +808,17 @@ def get_max_batch(lesson_id, concept_id):
     return row["max_batch"] if row["max_batch"] is not None else -1
 
 
+def _validate_quiz_choices(q):
+    choices = q.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("Quiz choices must be a non-empty list")
+    if q.get("answer") not in choices:
+        raise ValueError(f"Quiz answer is not among choices: {q.get('answer')!r}")
+
+
 def insert_quiz_questions(lesson_id, concept_id, questions, generation_batch):
+    for question in questions:
+        _validate_quiz_choices(question)
     conn = get_db()
     try:
         now = datetime.now(timezone.utc).isoformat()
@@ -735,6 +838,67 @@ def insert_quiz_questions(lesson_id, concept_id, questions, generation_batch):
         conn.close()
 
 
+def replace_active_quiz_questions(
+        lesson_id, concept_id, questions, user_id=None, attempt_number=None):
+    """Insert a regenerated batch and activate it canonically or for one student."""
+    for question in questions:
+        _validate_quiz_choices(question)
+    if not questions:
+        raise ValueError("Cannot activate an empty quiz batch")
+    if user_id is not None and attempt_number is None:
+        raise ValueError("A student quiz batch requires an attempt number")
+
+    conn = get_db()
+    try:
+        # Serialize batch allocation across workers and never expose a state
+        # where both the old and new batches are active.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT MAX(generation_batch) AS max_batch FROM quiz_questions WHERE lesson_id = ? AND concept_id = ?",
+            (lesson_id, concept_id),
+        ).fetchone()
+        generation_batch = (row["max_batch"] if row["max_batch"] is not None else -1) + 1
+        now = datetime.now(timezone.utc).isoformat()
+
+        if user_id is None:
+            conn.execute(
+                """UPDATE quiz_questions SET active = 0
+                   WHERE lesson_id = ? AND concept_id = ? AND active = 1""",
+                (lesson_id, concept_id),
+            )
+        active = int(user_id is None)
+        for i, q in enumerate(questions):
+            question_id = f"{lesson_id}_{concept_id}_b{generation_batch}_q{i:03d}"
+            conn.execute(
+                """INSERT INTO quiz_questions
+                   (question_id, concept_id, lesson_id, question_text, type, choices,
+                    answer, explanation, generation_batch, active, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (question_id, concept_id, lesson_id, q["question"], q["type"],
+                 json.dumps(q["choices"], ensure_ascii=False), q["answer"], q["explanation"],
+                 generation_batch, active, now),
+            )
+        if user_id is not None:
+            conn.execute(
+                """INSERT INTO student_quiz_batches
+                       (user_id, lesson_id, concept_id, generation_batch, attempt_number, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, lesson_id, concept_id) DO UPDATE SET
+                     generation_batch = excluded.generation_batch,
+                     attempt_number   = excluded.attempt_number,
+                     updated_at       = excluded.updated_at
+                   WHERE excluded.attempt_number >= student_quiz_batches.attempt_number""",
+                (user_id, lesson_id, concept_id, generation_batch, attempt_number, now),
+            )
+        conn.commit()
+        return generation_batch
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def delete_quiz_questions_for_lesson(lesson_id):
     """Clears any quiz questions already generated for this lesson — used
     before a curriculum-stage retry, which regenerates the curriculum (and
@@ -742,6 +906,7 @@ def delete_quiz_questions_for_lesson(lesson_id):
     the deterministic question_id of anything inserted before the failure."""
     conn = get_db()
     try:
+        conn.execute("DELETE FROM student_quiz_batches WHERE lesson_id = ?", (lesson_id,))
         conn.execute("DELETE FROM quiz_questions WHERE lesson_id = ?", (lesson_id,))
         conn.commit()
     finally:
@@ -857,17 +1022,30 @@ def get_saved_items(session_id, lesson_id, user_id=None):
 def update_lesson_progress(session_id, lesson_id, user_id=None, last_viewed_slide=None, completed=None):
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """INSERT INTO lesson_progress (session_id, lesson_id, user_id, last_viewed_slide, completed, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(session_id, lesson_id) DO UPDATE SET
-             user_id            = COALESCE(excluded.user_id, lesson_progress.user_id),
-             last_viewed_slide  = COALESCE(excluded.last_viewed_slide, lesson_progress.last_viewed_slide),
-             completed          = COALESCE(excluded.completed, lesson_progress.completed),
-             updated_at         = excluded.updated_at""",
-        (session_id, lesson_id, user_id, last_viewed_slide,
-         int(completed) if completed is not None else None, now)
-    )
+    if user_id is not None:
+        conn.execute(
+            """INSERT INTO lesson_progress
+                   (session_id, lesson_id, user_id, last_viewed_slide, completed, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, lesson_id) WHERE user_id IS NOT NULL DO UPDATE SET
+                 last_viewed_slide = COALESCE(excluded.last_viewed_slide, lesson_progress.last_viewed_slide),
+                 completed         = COALESCE(excluded.completed, lesson_progress.completed),
+                 updated_at        = excluded.updated_at""",
+            (session_id, lesson_id, user_id, last_viewed_slide,
+             int(completed) if completed is not None else None, now),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO lesson_progress
+                   (session_id, lesson_id, user_id, last_viewed_slide, completed, updated_at)
+               VALUES (?, ?, NULL, ?, ?, ?)
+               ON CONFLICT(session_id, lesson_id) DO UPDATE SET
+                 last_viewed_slide = COALESCE(excluded.last_viewed_slide, lesson_progress.last_viewed_slide),
+                 completed         = COALESCE(excluded.completed, lesson_progress.completed),
+                 updated_at        = excluded.updated_at""",
+            (session_id, lesson_id, last_viewed_slide,
+             int(completed) if completed is not None else None, now),
+        )
     conn.commit()
     conn.close()
 
@@ -876,11 +1054,17 @@ def get_lesson_progress(user_id=None, session_id=None, lesson_id=None):
     conn = get_db()
     if user_id:
         row = conn.execute(
-            "SELECT * FROM lesson_progress WHERE user_id = ? AND lesson_id = ?", (user_id, lesson_id)
+            """SELECT * FROM lesson_progress
+               WHERE user_id = ? AND lesson_id = ?
+               ORDER BY updated_at DESC, rowid DESC
+               LIMIT 1""",
+            (user_id, lesson_id),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT * FROM lesson_progress WHERE session_id = ? AND user_id IS NULL AND lesson_id = ?",
+            """SELECT * FROM lesson_progress
+               WHERE session_id = ? AND user_id IS NULL AND lesson_id = ?
+               LIMIT 1""",
             (session_id, lesson_id)
         ).fetchone()
     conn.close()

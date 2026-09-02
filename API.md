@@ -593,11 +593,17 @@ For an assignment student, the batch counts as one attempt per touched concept a
 {
   "ok": true,
   "touched_concept_ids": ["c003"],
-  "exhausted_concept_ids": []
+  "exhausted_concept_ids": [],
+  "regenerating_concept_ids": ["c003"]
 }
 ```
 
 Unknown question IDs and IDs belonging to another lesson are ignored.
+For each accepted non-review attempt, a replacement question batch is generated
+in the background and atomically becomes active for that student when it is
+complete. Another student's active questions and attempt count are unchanged.
+Owner previews regenerate the canonical batch used by students who have not yet
+created a personal retry batch.
 
 ### `GET /api/lessons/<lesson_id>/quiz-history`
 

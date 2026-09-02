@@ -76,6 +76,12 @@ class AccountDeletionTest(unittest.TestCase):
                VALUES (?, ?, ?, 'keyterm:1', 'keyterm', NULL, '2026-01-01T00:00:00+00:00')""",
             (session_id, user_id, lesson_id),
         )
+        conn.execute(
+            """INSERT INTO student_quiz_batches
+               (user_id, lesson_id, concept_id, generation_batch, attempt_number, updated_at)
+               VALUES (?, ?, 'concept-1', 1, 1, '2026-01-01T00:00:00+00:00')""",
+            (user_id, lesson_id),
+        )
         conn.commit()
         conn.close()
 
@@ -130,6 +136,7 @@ class AccountDeletionTest(unittest.TestCase):
         for table in (
             "classes", "assignments", "enrollments", "join_codes", "password_resets",
             "lessons", "quiz_questions", "quiz_attempts", "lesson_progress", "saved_items",
+            "student_quiz_batches",
         ):
             self.assertEqual(self.count(table), 0, table)
 
