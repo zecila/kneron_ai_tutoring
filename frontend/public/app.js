@@ -19,6 +19,10 @@ let authMode = "login";   // login, signup, forgot, reset
 let resetToken = null;
 let selectedRole = "student";
 
+const AppConfig = {
+  avatarEnabled: false,
+};
+
 // info card
 let infoPanelOpen = false;
 let activeInfoElement = null;
@@ -793,8 +797,31 @@ document.getElementById("btn-submit-join-class")?.addEventListener("click", asyn
 });
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
+async function loadAppConfig() {
+  try {
+    const response = await fetch("/api/config", {
+      headers: { "Accept": "application/json" },
+      cache: "no-store",
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || typeof data.avatar_enabled !== "boolean") {
+      throw new Error(data.error || "Application configuration is invalid.");
+    }
+    AppConfig.avatarEnabled = data.avatar_enabled;
+  } catch (err) {
+    AppConfig.avatarEnabled = false;
+    console.warn("Application configuration unavailable; avatar disabled:", err);
+  }
+
+  document.documentElement.dataset.avatarEnabled = String(AppConfig.avatarEnabled);
+  document.getElementById("tutor-chat-avatar")?.classList.toggle(
+    "hidden",
+    !AppConfig.avatarEnabled
+  );
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
-  await checkAuth();
+  await Promise.all([checkAuth(), loadAppConfig()]);
   if (lessonId) {
     enterLesson(lessonId);
   } else {
@@ -2429,6 +2456,7 @@ const TutorSession = {
   activePendingReply: null,
 
   async connect(activeLessonId, { recovery = false } = {}) {
+    if (!AppConfig.avatarEnabled) return null;
     if (!activeLessonId) throw new Error("No active lesson for tutor chat.");
     if (
       this.activeLessonId === activeLessonId &&
@@ -2673,6 +2701,7 @@ const TutorSession = {
     const widget = document.getElementById("tutor-chat-widget");
     const panel = document.getElementById("tutor-chat-panel");
     return Boolean(
+      AppConfig.avatarEnabled &&
       activeLessonId &&
       lessonId === activeLessonId &&
       widget &&
@@ -2824,6 +2853,7 @@ const TutorSession = {
   },
 
   async _avatarControl(action, { attemptId = null, keepalive = false } = {}) {
+    if (!AppConfig.avatarEnabled) return null;
     const activeLessonId = this.activeLessonId;
     const avatarSessionId = this.sessionId;
     if (!activeLessonId || !avatarSessionId) return null;
@@ -3020,6 +3050,7 @@ const TutorSession = {
   },
 
   async speakMessage(text, attempt) {
+    if (!AppConfig.avatarEnabled) return null;
     if (this.activeLessonId !== lessonId || !this.sessionId) {
       await this.connect(lessonId);
     }
@@ -3045,6 +3076,7 @@ const TUTOR_AVATAR_SCROLL_RANGE = 280;
 let tutorAvatarResizeFrame = null;
 
 function updateTutorAvatarSize() {
+  if (!AppConfig.avatarEnabled) return;
   const panel = document.getElementById("tutor-chat-panel");
   if (panel.classList.contains("hidden")) return;
 
@@ -3119,6 +3151,7 @@ function setTutorConnectionStatus(message, isError = false, { retry = false } = 
 }
 
 function retryTutorAvatarConnection() {
+  if (!AppConfig.avatarEnabled) return;
   const panel = document.getElementById("tutor-chat-panel");
   if (!lessonId || panel.classList.contains("hidden")) return;
   setTutorConnectionStatus("Connecting avatar...");
@@ -3127,6 +3160,10 @@ function retryTutorAvatarConnection() {
 }
 
 function ensureTutorSessionConnected() {
+  if (!AppConfig.avatarEnabled) {
+    setTutorConnectionStatus("");
+    return Promise.resolve(null);
+  }
   if (!lessonId) return Promise.resolve(null);
   const connectingLessonId = lessonId;
   const isConnected =
@@ -3220,6 +3257,7 @@ function loadTutorSTTConfig() {
 
 function stopTutorActivity() {
   TutorSession.cancelActiveMessage();
+  if (!AppConfig.avatarEnabled) return Promise.resolve(false);
   const interruptRequest = TutorSession.interruptSpeech(TutorSession.messageAttempt).catch((err) => {
     console.debug("[TutorSession] interrupt unavailable:", err);
     return false;
@@ -3237,8 +3275,10 @@ function setTutorWidgetVisible(visible) {
       console.debug("[TutorSTT] configuration unavailable:", err);
     });
     if (!panel.classList.contains("hidden")) prepareTutorSTTForGrantedPermission();
-    TutorSession._syncAudioMute();
-    ensureTutorSessionConnected().catch(() => {});
+    if (AppConfig.avatarEnabled) {
+      TutorSession._syncAudioMute();
+      ensureTutorSessionConnected().catch(() => {});
+    }
     return;
   }
   closeTutorSTTStandby();
@@ -3361,11 +3401,13 @@ function toggleTutorChat() {
   }
   panel.classList.remove("hidden");
   pauseNarrationForTutor();
-  TutorSession._syncAudioMute();
-  videoEl.play().catch((err) => console.debug("Tutor avatar playback deferred:", err));
-  scheduleTutorAvatarSizeUpdate();
+  if (AppConfig.avatarEnabled) {
+    TutorSession._syncAudioMute();
+    videoEl.play().catch((err) => console.debug("Tutor avatar playback deferred:", err));
+    scheduleTutorAvatarSizeUpdate();
+  }
   prepareTutorSTTForGrantedPermission();
-  ensureTutorSessionConnected().catch(() => {});
+  if (AppConfig.avatarEnabled) ensureTutorSessionConnected().catch(() => {});
 }
 
 let tutorRecordingShellActive = false;
@@ -4060,17 +4102,21 @@ async function sendTutorChatMessage() {
   if (!text) return;
   input.value = "";
   const attempt = TutorSession.beginMessageAttempt();
-  const interruptRequest = TutorSession.interruptSpeech(attempt.id, { preserveState: true }).catch((err) => {
-    console.debug("[TutorSession] immediate interrupt unavailable:", err);
-    return false;
-  });
+  const interruptRequest = AppConfig.avatarEnabled
+    ? TutorSession.interruptSpeech(attempt.id, { preserveState: true }).catch((err) => {
+        console.debug("[TutorSession] immediate interrupt unavailable:", err);
+        return false;
+      })
+    : Promise.resolve(false);
   appendTutorChatBubble(text, "tutor-chat-bubble-user");
   const pendingReply = appendTutorChatBubble("Thinking...", "tutor-chat-bubble-agent");
   TutorSession.registerPendingReply(attempt.id, pendingReply);
-  const avatarReady = ensureTutorSessionConnected().then(
-    () => null,
-    (error) => error
-  );
+  const avatarReady = AppConfig.avatarEnabled
+    ? ensureTutorSessionConnected().then(
+        () => null,
+        (error) => error
+      )
+    : Promise.resolve(null);
   let replyGenerated = false;
   try {
     const reply = await TutorSession.sendMessage(text, attempt);
@@ -4079,13 +4125,17 @@ async function sendTutorChatMessage() {
     pendingReply.textContent = reply;
     scheduleTutorAvatarSizeUpdate();
 
-    const connectionError = await avatarReady;
-    if (connectionError) throw connectionError;
-    if (!TutorSession.isCurrentMessageAttempt(attempt.id)) {
-      throw new DOMException("Tutor response was superseded.", "AbortError");
+    if (AppConfig.avatarEnabled) {
+      const connectionError = await avatarReady;
+      if (connectionError) throw connectionError;
+      if (!TutorSession.isCurrentMessageAttempt(attempt.id)) {
+        throw new DOMException("Tutor response was superseded.", "AbortError");
+      }
+      await interruptRequest;
+      await TutorSession.speakMessage(reply, attempt);
+    } else {
+      TutorSession._setSpeechState("idle");
     }
-    await interruptRequest;
-    await TutorSession.speakMessage(reply, attempt);
   } catch (err) {
     const superseded = err?.name === "AbortError" || !TutorSession.isCurrentMessageAttempt(attempt.id);
     if (superseded) return;

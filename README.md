@@ -62,18 +62,18 @@ See [`API.md`](./API.md) for the full API reference and [`HANDOFF.md`](./HANDOFF
 ## Prerequisites
 
 - Docker with Compose v2 (`docker compose`, not the older standalone `docker-compose`)
-- An NVIDIA GPU and current driver for LiveTalking
-- Sibling checkouts of the pinned LiveTalking and WhisperLiveKit repositories
+- An NVIDIA GPU and current driver when `AVATAR_ENABLED=true`
+- A sibling checkout of pinned WhisperLiveKit, plus pinned LiveTalking when `AVATAR_ENABLED=true`
 - An OpenAI-compatible API key (see [Environment variables](#environment-variables))
-- Python 3.12 and the pinned LiveTalking environment
+- Python 3.12 and the pinned LiveTalking environment when `AVATAR_ENABLED=true`
 
 ## Setup
 
 1. **Clone the tutor, pinned LiveTalking fork, and pinned WhisperLiveKit repositories as siblings.** See [`HANDOFF.md`](./HANDOFF.md).
 
-2. **Prepare the LiveTalking model and avatar**, then run `./scripts/setup-local.sh`. The helper creates `.env` from `.env.example` on its first run and checks the local prerequisites.
+2. **Set `AVATAR_ENABLED` and run `./scripts/setup-local.sh`.** When the avatar is enabled, prepare the LiveTalking model and avatar first. The helper creates `.env` from `.env.example` on its first run and checks the applicable local prerequisites.
 
-3. **Install and start the managed LiveTalking service:**
+3. **When `AVATAR_ENABLED=true`, install and start the managed LiveTalking service:**
    ```bash
    ./scripts/install-livetalking-service.sh
    ```
@@ -101,6 +101,8 @@ Copy `.env.example` to `.env` and set these values:
 
 | Variable | Purpose |
 |---|---|
+| `AVATAR_ENABLED` | Enables LiveTalking video and speech. Set to `false` on hosts without an NVIDIA GPU; tutor text chat and microphone transcription remain available. Defaults to `true` |
+| `TRUST_PROXY` | Trusts one reverse-proxy hop for the client IP and HTTPS scheme. Leave `false` for direct/local access; the server override sets it to `true` behind Caddy |
 | `OPENAI_API_KEY` | API key for the LLM provider used by the curriculum/slideshow/animation pipeline |
 | `FLASK_SECRET_KEY` | Signs session cookies — keep this stable across restarts, or existing users get logged out |
 | `LLM_BASE_URL` | Base URL for the LLM API (supports OpenAI-compatible endpoints) |
@@ -125,6 +127,8 @@ Copy `.env.example` to `.env` and set these values:
 `MANIM_MCP_URL` and `MANIM_DOWNLOAD_URL` are already wired up in `docker-compose.yml` to point at the `manim-agent` service by its container name — no need to set these yourself under normal Compose usage.
 
 `LIVETALKING_BASE_URL` is also wired to `http://host.docker.internal:8010`, where the supervised local LiveTalking process listens. `GET /api/avatar/health` reports whether that process is ready without exposing internal details.
+
+When `AVATAR_ENABLED=false`, the frontend does not create a WebRTC connection or send avatar speech commands, and the LiveTalking service does not need to run. `GET /api/avatar/health` reports `disabled`; tutor text chat and WhisperLiveKit microphone transcription continue to work.
 
 The included WhisperLiveKit service runs the Faster Whisper `base` model on CPU, publishes port `8002`, and uses this Deepgram-compatible streaming endpoint:
 

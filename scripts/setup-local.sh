@@ -25,14 +25,6 @@ else
   ok "Docker Compose is installed"
 fi
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-  problem "nvidia-smi is not available; LiveTalking requires an NVIDIA GPU"
-elif ! nvidia-smi >/dev/null 2>&1; then
-  problem "the NVIDIA GPU or driver is not available"
-else
-  ok "NVIDIA GPU is available"
-fi
-
 if [[ ! -f "${ENV_FILE}" ]]; then
   cp "${PROJECT_DIR}/.env.example" "${ENV_FILE}"
   printf '[created] %s\n' "${ENV_FILE}"
@@ -43,6 +35,32 @@ fi
 env_value() {
   sed -n "s/^${1}=//p" "${ENV_FILE}" | tail -n 1
 }
+
+avatar_setting="${AVATAR_ENABLED:-$(env_value AVATAR_ENABLED)}"
+case "${avatar_setting,,}" in
+  ""|1|true|yes|on)
+    avatar_enabled=true
+    ;;
+  0|false|no|off)
+    avatar_enabled=false
+    ;;
+  *)
+    avatar_enabled=false
+    problem "AVATAR_ENABLED must be true or false"
+    ;;
+esac
+
+if [[ "${avatar_enabled}" == true ]]; then
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    problem "nvidia-smi is not available; LiveTalking requires an NVIDIA GPU"
+  elif ! nvidia-smi >/dev/null 2>&1; then
+    problem "the NVIDIA GPU or driver is not available"
+  else
+    ok "NVIDIA GPU is available"
+  fi
+else
+  ok "avatar is disabled; NVIDIA GPU is not required"
+fi
 
 resolve_path() {
   local value="$1"
@@ -88,27 +106,29 @@ else
   fi
 fi
 
-if [[ ! -f "${LIVETALKING_DIR}/app.py" ]]; then
-  problem "LiveTalking was not found at ${LIVETALKING_DIR}"
-else
-  ok "LiveTalking checkout found"
-
-  if ! grep -q "close_session" "${LIVETALKING_DIR}/server/routes.py" 2>/dev/null; then
-    problem "LiveTalking does not appear to contain the tutor session-cleanup changes"
+if [[ "${avatar_enabled}" == true ]]; then
+  if [[ ! -f "${LIVETALKING_DIR}/app.py" ]]; then
+    problem "LiveTalking was not found at ${LIVETALKING_DIR}"
   else
-    ok "LiveTalking tutor integration changes found"
-  fi
+    ok "LiveTalking checkout found"
 
-  if [[ ! -f "${LIVETALKING_DIR}/models/wav2lip.pth" ]]; then
-    problem "LiveTalking model is missing: models/wav2lip.pth"
-  else
-    ok "LiveTalking Wav2Lip model found"
-  fi
+    if ! grep -q "close_session" "${LIVETALKING_DIR}/server/routes.py" 2>/dev/null; then
+      problem "LiveTalking does not appear to contain the tutor session-cleanup changes"
+    else
+      ok "LiveTalking tutor integration changes found"
+    fi
 
-  if [[ ! -f "${LIVETALKING_DIR}/data/avatars/tutor_avatar_v3/coords.pkl" ]]; then
-    problem "LiveTalking avatar is missing: data/avatars/tutor_avatar_v3"
-  else
-    ok "LiveTalking tutor_avatar_v3 found"
+    if [[ ! -f "${LIVETALKING_DIR}/models/wav2lip.pth" ]]; then
+      problem "LiveTalking model is missing: models/wav2lip.pth"
+    else
+      ok "LiveTalking Wav2Lip model found"
+    fi
+
+    if [[ ! -f "${LIVETALKING_DIR}/data/avatars/tutor_avatar_v3/coords.pkl" ]]; then
+      problem "LiveTalking avatar is missing: data/avatars/tutor_avatar_v3"
+    else
+      ok "LiveTalking tutor_avatar_v3 found"
+    fi
   fi
 fi
 
@@ -125,7 +145,13 @@ if (( errors > 0 )); then
   exit 1
 fi
 
-printf '\nLocal prerequisites are ready. Install the managed LiveTalking service once:\n'
-printf '  cd %s && ./scripts/install-livetalking-service.sh\n' "${PROJECT_DIR}"
-printf 'Then start the application with:\n'
+printf '\nLocal prerequisites are ready.\n'
+if [[ "${avatar_enabled}" == true ]]; then
+  printf 'Install the managed LiveTalking service once:\n'
+  printf '  cd %s && ./scripts/install-livetalking-service.sh\n' "${PROJECT_DIR}"
+  printf 'Then start the application with:\n'
+else
+  printf 'The avatar is disabled, so the LiveTalking service does not need to be installed.\n'
+  printf 'Start the application with:\n'
+fi
 printf '  cd %s && docker compose up -d --build\n' "${PROJECT_DIR}"

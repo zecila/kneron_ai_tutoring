@@ -1,0 +1,51 @@
+services:
+  backend:
+    # Caddy is the only service exposed on the server host.
+    ports: !reset []
+    environment:
+      FLASK_ENV: production
+      AVATAR_ENABLED: "false"
+      # Trust exactly the one Caddy hop for client IP and HTTPS scheme headers.
+      TRUST_PROXY: "true"
+      STT_WEBSOCKET_URL: "wss://10.200.210.28:8444/stt/v1/listen?language=en&encoding=linear16&sample_rate=16000&channels=1&interim_results=true&endpointing=1000&vad_events=true"
+
+  manim-agent:
+    # The backend reaches this service at manim-agent:8000.
+    ports: !reset []
+
+  whisperlivekit:
+    # Browser WebSocket traffic reaches this service through Caddy at /stt.
+    ports: !reset []
+    command:
+      - --backend
+      - ${WHISPER_BACKEND:-faster-whisper}
+      - --model
+      - ${WHISPER_MODEL:-base}
+      - --language
+      - ${WHISPER_LANGUAGE:-en}
+      - --pcm-input
+      - --pause-segmentation-seconds
+      - ${WHISPER_PAUSE_SEGMENTATION_SECONDS:-1.0}
+      - --cors-origins
+      - https://10.200.210.28:8444
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "10.200.210.28:8444:8444"
+    volumes:
+      - ./deploy/Caddyfile.server:/etc/caddy/Caddyfile:ro
+      - kneron-caddy-data:/data
+      - kneron-caddy-config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      whisperlivekit:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  kneron-caddy-data:
+    name: kneron-caddy-data
+  kneron-caddy-config:
+    name: kneron-caddy-config

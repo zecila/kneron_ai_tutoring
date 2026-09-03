@@ -1,0 +1,20 @@
+https://10.200.210.28:8444 {
+	# Caddy keeps its local CA and certificates in the caddy data volume.
+	tls internal
+
+	encode zstd gzip
+
+	# Strip /stt before forwarding, so WhisperLiveKit receives /v1/listen.
+	handle_path /stt/* {
+		reverse_proxy whisperlivekit:8000
+	}
+
+	handle {
+		reverse_proxy backend:5000
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

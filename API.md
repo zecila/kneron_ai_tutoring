@@ -58,6 +58,7 @@ The default limit is **200 requests per hour**. It is keyed by signed-in user, t
 | `POST /api/lessons/<lesson_id>/info/equation` | 60/hour |
 | `POST /api/tts` | 120/hour |
 | `GET /api/health` | Exempt |
+| `GET /api/config` | Exempt |
 | `GET /api/avatar/health` | Exempt |
 | `GET /api/lessons/<lesson_id>/status` | Exempt |
 | `POST /api/lessons/<lesson_id>/avatar/webrtc/offer` | 60/hour |
@@ -711,6 +712,14 @@ Long text is split at sentence/word boundaries according to `TTS_MAX_CHARS_PER_R
 
 Returns `{ "status": "ok" }` when the backend is accepting requests. Docker Compose uses this route for its backend health check.
 
+### `GET /api/config`
+
+Returns public browser feature configuration and sets `Cache-Control: no-store`.
+
+```json
+{ "avatar_enabled": false }
+```
+
 ### `GET /api/stt/config`
 
 Returns the browser-facing WebSocket URL configured by `STT_WEBSOCKET_URL` and sets `Cache-Control: no-store`.
@@ -732,7 +741,9 @@ Except for the public health route, routes in this section require lesson access
 
 ### `GET /api/avatar/health`
 
-Returns `{ "status": "ready" }` when LiveTalking answers its readiness probe. It returns `503`, `{ "status": "unavailable" }`, and `Retry-After: 2` while LiveTalking is starting or unresponsive. This route is public, rate-limit exempt, and does not expose upstream service details.
+Returns `{ "status": "ready" }` when LiveTalking answers its readiness probe. It returns `503`, `{ "status": "unavailable" }`, and `Retry-After: 2` while LiveTalking is starting or unresponsive. When `AVATAR_ENABLED=false`, it returns `200` with `{ "status": "disabled" }` without contacting LiveTalking. This route is public, rate-limit exempt, and does not expose upstream service details.
+
+All avatar command routes return `503` with `{ "error": "Avatar feature is disabled" }` when `AVATAR_ENABLED=false`.
 
 ### `POST /api/lessons/<lesson_id>/avatar/webrtc/offer`
 

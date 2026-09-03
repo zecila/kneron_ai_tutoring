@@ -15,6 +15,7 @@ services:
       - MANIM_DOWNLOAD_URL=http://manim-agent:8000/download
       - REDIS_URL=redis://redis:6379
       - FLASK_ENV=${FLASK_ENV:-development}
+      - AVATAR_ENABLED=${AVATAR_ENABLED:-true}
     volumes:
       - ./backend/data:/app/backend/data
     depends_on:
