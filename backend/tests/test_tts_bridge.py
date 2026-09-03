@@ -61,6 +61,9 @@ def _make_wav(frames=b"\x01\x00" * 3):
 class TTSBridgeTest(unittest.TestCase):
     def setUp(self):
         server.app.config.update(TESTING=True, RATELIMIT_ENABLED=False)
+        avatar_patcher = patch.object(server, "AVATAR_ENABLED", True)
+        avatar_patcher.start()
+        self.addCleanup(avatar_patcher.stop)
         server._tts_request_redis = None
         server._tutor_attempt_redis = None
         server._tutor_attempts.clear()

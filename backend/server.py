@@ -22,6 +22,7 @@ from openai import OpenAI, APIConnectionError, RateLimitError, InternalServerErr
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from redis import Redis
@@ -61,9 +62,32 @@ from pipeline_queue import enqueue_job, start_workers
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 from lesson_paths import FRONTEND_DIR, UPLOAD_DIR, LESSONS_DIR
-ALLOWED_EXTS  = {".pdf", ".docx", ".pptx"} 
+ALLOWED_EXTS  = {".pdf", ".docx", ".pptx"}
+
+
+def _environment_flag(name, default):
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"{name} must be true or false")
+
+
+AVATAR_ENABLED = _environment_flag("AVATAR_ENABLED", True)
+TRUST_PROXY = _environment_flag("TRUST_PROXY", False)
+
+
+def _proxy_aware_wsgi_app(wsgi_app, trust_proxy):
+    if not trust_proxy:
+        return wsgi_app
+    return ProxyFix(wsgi_app, x_for=1, x_proto=1)
 
 app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
+app.wsgi_app = _proxy_aware_wsgi_app(app.wsgi_app, TRUST_PROXY)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB upload cap
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
 # uncomment before production; rn testing locally (no TLS)
@@ -119,6 +143,14 @@ def rate_limited(e):
 @limiter.exempt
 def health():
     response = jsonify({"status": "ok"})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/config", methods=["GET"])
+@limiter.exempt
+def public_config():
+    response = jsonify({"avatar_enabled": AVATAR_ENABLED})
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -1940,9 +1972,19 @@ def _livetalking_is_ready():
     return isinstance(payload, dict) and payload.get("status") == "ready"
 
 
+def _avatar_disabled_response():
+    response = jsonify({"error": "Avatar feature is disabled"})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 503
+
+
 @app.route("/api/avatar/health", methods=["GET"])
 @limiter.exempt
 def avatar_health():
+    if not AVATAR_ENABLED:
+        response = jsonify({"status": "disabled"})
+        response.headers["Cache-Control"] = "no-store"
+        return response
     try:
         ready = _livetalking_is_ready()
     except (requests.RequestException, ValueError):
@@ -1957,6 +1999,8 @@ def avatar_health():
 @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
 @limiter.limit("60 per hour")
 def avatar_webrtc_offer(lesson_id):
+    if not AVATAR_ENABLED:
+        return _avatar_disabled_response()
     user_id, session_id = current_identity()
     if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
@@ -2485,6 +2529,8 @@ def _is_current_tutor_attempt(avatar_session_id, attempt_id):
 @app.route("/api/lessons/<lesson_id>/avatar/speak", methods=["POST"])
 @limiter.limit("120 per hour")
 def avatar_speak(lesson_id):
+    if not AVATAR_ENABLED:
+        return _avatar_disabled_response()
     user_id, session_id = current_identity()
     if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
@@ -2561,6 +2607,8 @@ def avatar_speak(lesson_id):
 @app.route("/api/lessons/<lesson_id>/avatar/interrupt", methods=["POST"])
 @limiter.limit("240 per hour")
 def avatar_interrupt(lesson_id):
+    if not AVATAR_ENABLED:
+        return _avatar_disabled_response()
     user_id, session_id = current_identity()
     if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
@@ -2595,6 +2643,8 @@ def avatar_interrupt(lesson_id):
 @app.route("/api/lessons/<lesson_id>/avatar/speaking", methods=["POST"])
 @limiter.limit("1200 per hour")
 def avatar_speaking(lesson_id):
+    if not AVATAR_ENABLED:
+        return _avatar_disabled_response()
     user_id, session_id = current_identity()
     if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
@@ -2624,6 +2674,8 @@ def avatar_speaking(lesson_id):
 @app.route("/api/lessons/<lesson_id>/avatar/disconnect", methods=["POST"])
 @limiter.limit("240 per hour")
 def avatar_disconnect(lesson_id):
+    if not AVATAR_ENABLED:
+        return _avatar_disabled_response()
     user_id, session_id = current_identity()
     if not resolve_lesson_access(lesson_id, user_id, session_id):
         return jsonify({"error": "Lesson not found"}), 404
