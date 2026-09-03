@@ -20,6 +20,16 @@ services:
     depends_on:
       - redis
       - manim-agent
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://localhost:5000/api/health
+      interval: 15s
+      timeout: 5s
+      start_period: 5m
+      retries: 3
     restart: unless-stopped
 
   manim-agent:

@@ -1,0 +1,16 @@
+[Unit]
+Description=Kneron LiveTalking avatar service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory="@PROJECT_DIR@"
+Environment="LIVETALKING_PATH=@LIVETALKING_DIR@"
+ExecStart="@PYTHON@" "@PROJECT_DIR@/scripts/supervise-livetalking.py"
+Restart=always
+RestartSec=5
+TimeoutStopSec=35
+
+[Install]
+WantedBy=default.target

@@ -125,5 +125,7 @@ if (( errors > 0 )); then
   exit 1
 fi
 
-printf '\nLocal prerequisites are ready. Start LiveTalking first, then run:\n'
+printf '\nLocal prerequisites are ready. Install the managed LiveTalking service once:\n'
+printf '  cd %s && ./scripts/install-livetalking-service.sh\n' "${PROJECT_DIR}"
+printf 'Then start the application with:\n'
 printf '  cd %s && docker compose up -d --build\n' "${PROJECT_DIR}"

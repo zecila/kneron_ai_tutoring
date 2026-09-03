@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import io
 import os
@@ -23,7 +25,7 @@ from werkzeug.exceptions import HTTPException
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from redis import Redis
-from redis.exceptions import RedisError
+from redis.exceptions import LockError, RedisError
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -111,6 +113,15 @@ def file_too_large(e):
 @app.errorhandler(429)
 def rate_limited(e):
     return jsonify({"error": "Too many requests. Please slow down and try again shortly."}), 429
+
+
+@app.route("/api/health", methods=["GET"])
+@limiter.exempt
+def health():
+    response = jsonify({"status": "ok"})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 
 def current_identity():
     """Returns (user_id, session_id). user_id is None for anonymous
@@ -1095,7 +1106,23 @@ TTS_VERSION = os.environ.get("TTS_VERSION", "kneo350")
 TUTOR_TTS_MODEL = os.environ.get("TUTOR_TTS_MODEL", TTS_MODEL)
 TUTOR_TTS_VERSION = os.environ.get("TUTOR_TTS_VERSION", TTS_VERSION)
 TTS_MAX_CHARS_PER_REQUEST = max(100, int(os.environ.get("TTS_MAX_CHARS_PER_REQUEST", "500")))
-TTS_MAX_RETRIES = 2
+TTS_MAX_RETRIES = max(0, int(os.environ.get("TTS_MAX_RETRIES", "4")))
+TTS_REQUEST_TIMEOUT = int(os.environ.get("TTS_REQUEST_TIMEOUT", "60"))
+TTS_READY_TIMEOUT = int(os.environ.get("TTS_READY_TIMEOUT", "300"))
+TTS_RECOVERY_TIMEOUT = int(os.environ.get("TTS_RECOVERY_TIMEOUT", "45"))
+TTS_READY_POLL_INTERVAL = float(os.environ.get("TTS_READY_POLL_INTERVAL", "2"))
+TTS_RETRY_BASE_DELAY = float(os.environ.get("TTS_RETRY_BASE_DELAY", "1"))
+TTS_RETRY_MAX_DELAY = float(os.environ.get("TTS_RETRY_MAX_DELAY", "8"))
+TTS_LOCK_WAIT_TIMEOUT = float(os.environ.get("TTS_LOCK_WAIT_TIMEOUT", "100"))
+TTS_LOCK_TIMEOUT = int(os.environ.get("TTS_LOCK_TIMEOUT", "130"))
+_tts_init_lock = threading.Lock()
+_tts_local_generation_lock = threading.Lock()
+_tts_redis_url = os.environ.get("REDIS_URL", "memory://")
+_tts_request_redis = (
+    Redis.from_url(_tts_redis_url, decode_responses=True)
+    if _tts_redis_url.startswith(("redis://", "rediss://"))
+    else None
+)
 
 
 class TTSServiceError(Exception):
@@ -1150,45 +1177,201 @@ def _split_tts_text(text, max_chars=None):
     return chunks
 
 
+def _validate_tts_wav(wav_bytes):
+    if not isinstance(wav_bytes, bytes) or not wav_bytes.startswith(b"RIFF") or wav_bytes[8:12] != b"WAVE":
+        raise TTSServiceError("TTS service returned an invalid WAV file")
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wav_file:
+            if wav_file.getnchannels() < 1 or wav_file.getframerate() < 1 or wav_file.getnframes() < 1:
+                raise TTSServiceError("TTS service returned an empty WAV file")
+    except (EOFError, wave.Error) as e:
+        raise TTSServiceError("TTS service returned an invalid WAV file") from e
+    return wav_bytes
+
+
+def _parse_tts_base64_stream(response):
+    wav_chunks = []
+    completed = False
+
+    for line in response.iter_lines():
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError) as e:
+            raise TTSServiceError("TTS service returned an invalid event stream") from e
+        if not isinstance(event, dict):
+            raise TTSServiceError("TTS service returned an invalid event stream")
+
+        event_name = event.get("event")
+        if event_name == "done":
+            completed = True
+            break
+        if event_name == "error":
+            upstream = str(event.get("data") or event.get("message") or "TTS generation failed")
+            raise TTSServiceError("TTS service unavailable", upstream=upstream)
+        if event_name != "chunk":
+            continue
+
+        encoded = event.get("data")
+        if not isinstance(encoded, str) or not encoded:
+            raise TTSServiceError("TTS service returned an empty audio chunk")
+        try:
+            wav_chunks.append(_validate_tts_wav(base64.b64decode(encoded, validate=True)))
+        except (ValueError, binascii.Error) as e:
+            raise TTSServiceError("TTS service returned invalid base64 audio") from e
+
+    if not completed:
+        raise TTSServiceError("TTS service ended its response before completion")
+    if not wav_chunks:
+        raise TTSServiceError("TTS service returned no audio")
+    return _merge_tts_wav_chunks(wav_chunks)
+
+
+def _tts_instances(payload):
+    if isinstance(payload, dict):
+        payload = payload.get("instances", [])
+    return payload if isinstance(payload, list) else []
+
+
+def _tts_model_is_healthy(model_name, version):
+    response = requests.get(f"{TTS_BASE}/instances", timeout=10)
+    response.raise_for_status()
+    return any(
+        isinstance(instance, dict)
+        and instance.get("model_name") == model_name
+        and instance.get("version") == version
+        and instance.get("status") == "healthy"
+        for instance in _tts_instances(response.json())
+    )
+
+
+def _initialize_tts_model(model_name, version, wait_timeout):
+    response = requests.post(
+        f"{TTS_BASE}/init_model",
+        json={"model_name": model_name, "version": version},
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    deadline = time.monotonic() + wait_timeout
+    while True:
+        if _tts_model_is_healthy(model_name, version):
+            return
+        if time.monotonic() >= deadline:
+            raise TTSServiceError(f"TTS model {model_name}/{version} did not become ready")
+        time.sleep(TTS_READY_POLL_INTERVAL)
+
+
+def _recover_tts_model(model_name, version):
+    with _tts_init_lock:
+        try:
+            if _tts_model_is_healthy(model_name, version):
+                return
+        except requests.RequestException:
+            pass
+        _initialize_tts_model(model_name, version, TTS_RECOVERY_TIMEOUT)
+
+
+@contextmanager
+def _tts_generation_slot(model_name, version):
+    redis_lock = None
+    if _tts_request_redis is not None:
+        try:
+            model_key = hashlib.sha256(f"{model_name}\0{version}".encode()).hexdigest()[:16]
+            redis_lock = _tts_request_redis.lock(
+                f"tts:generation-slot:v1:{model_key}",
+                timeout=TTS_LOCK_TIMEOUT,
+                blocking_timeout=TTS_LOCK_WAIT_TIMEOUT,
+            )
+            acquired = redis_lock.acquire()
+        except RedisError as e:
+            app.logger.warning("TTS coordination unavailable; using process-local lock: %s", e)
+        else:
+            if not acquired:
+                raise TTSServiceError("TTS service is busy; please retry", status_code=503)
+            try:
+                yield
+            finally:
+                try:
+                    redis_lock.release()
+                except (LockError, RedisError):
+                    app.logger.warning("TTS generation lock expired before it could be released")
+            return
+
+    if not _tts_local_generation_lock.acquire(timeout=TTS_LOCK_WAIT_TIMEOUT):
+        raise TTSServiceError("TTS service is busy; please retry", status_code=503)
+    try:
+        yield
+    finally:
+        _tts_local_generation_lock.release()
+
+
 def _request_tts_wav_chunk(text, model_name, version, chunk_number, chunk_count):
+    with _tts_generation_slot(model_name, version):
+        return _request_tts_wav_chunk_in_slot(
+            text, model_name, version, chunk_number, chunk_count
+        )
+
+
+def _request_tts_wav_chunk_in_slot(text, model_name, version, chunk_number, chunk_count):
     last_err = None
 
     for attempt in range(TTS_MAX_RETRIES + 1):
+        response = None
         try:
-            r = requests.post(
+            response = requests.post(
                 f"{TTS_BASE}/audio/tts",
                 json={
                     "text": text,
-                    "output_format": "audio",
+                    "output_format": "base64",
                     "model_name": model_name,
                     "version": version
                 },
-                timeout=30
+                stream=True,
+                timeout=TTS_REQUEST_TIMEOUT,
             )
-            r.raise_for_status()
-            return r.content
-        except requests.exceptions.ChunkedEncodingError as e:
+            response.raise_for_status()
+            return _parse_tts_base64_stream(response)
+        except (requests.RequestException, TTSServiceError) as e:
             last_err = e
             retrying = attempt < TTS_MAX_RETRIES
+            upstream_detail = (
+                f"; upstream={e.upstream[:300]}"
+                if isinstance(e, TTSServiceError) and e.upstream
+                else ""
+            )
             app.logger.warning(
                 f"TTS chunk {chunk_number}/{chunk_count} attempt {attempt + 1} "
-                f"dropped mid-stream{', retrying' if retrying else ''}: {e}"
+                f"failed{', retrying' if retrying else ''}: {type(e).__name__}: {e}{upstream_detail}"
             )
-            continue
-        except requests.HTTPError as e:
-            status_code = e.response.status_code if e.response is not None else None
-            upstream = e.response.text if e.response is not None else None
-            app.logger.error(f"TTS upstream error: {status_code} - {upstream}")
-            raise TTSServiceError("TTS service unavailable", upstream=upstream, status_code=status_code) from e
-        except requests.RequestException as e:
-            app.logger.error(f"TTS request failed: {type(e).__name__}: {e}")
-            raise TTSServiceError("TTS service unavailable") from e
+            if retrying and attempt == 0:
+                try:
+                    _recover_tts_model(model_name, version)
+                except (requests.RequestException, TTSServiceError) as recovery_error:
+                    app.logger.warning(
+                        "TTS model recovery did not complete: %s: %s",
+                        type(recovery_error).__name__,
+                        recovery_error,
+                    )
+            if retrying:
+                time.sleep(min(TTS_RETRY_BASE_DELAY * (2 ** attempt), TTS_RETRY_MAX_DELAY))
+        finally:
+            if response is not None:
+                response.close()
 
     app.logger.error(
         f"TTS chunk {chunk_number}/{chunk_count} failed after "
         f"{TTS_MAX_RETRIES + 1} attempts: {last_err}"
     )
-    raise TTSServiceError("TTS service unstable") from last_err
+    if isinstance(last_err, TTSServiceError):
+        raise last_err
+    status_code = (
+        last_err.response.status_code
+        if isinstance(last_err, requests.HTTPError) and last_err.response is not None
+        else None
+    )
+    raise TTSServiceError("TTS service unavailable", status_code=status_code) from last_err
 
 
 def _merge_tts_wav_chunks(wav_chunks):
@@ -1249,19 +1432,20 @@ def _synthesize_tts_wav(text, model_name=None, version=None, should_continue=Non
     return _merge_tts_wav_chunks(wav_chunks)
 
 
-def init_tts():
+def init_tts(require_ready=False, ready_timeout=None):
+    ready_timeout = TTS_READY_TIMEOUT if ready_timeout is None else ready_timeout
+    failures = []
     for model_name, version in _configured_tts_models():
         try:
-            r = requests.post(f"{TTS_BASE}/init_model", json={
-                "model_name": model_name,
-                "version": version
-            })
-            if not r.ok:
-                print(f"TTS init failed: {r.status_code} - {r.text}")
-            r.raise_for_status()
-            print(f"TTS model initialized: {model_name}/{version}")
+            _initialize_tts_model(model_name, version, ready_timeout)
+            app.logger.info("TTS model ready: %s/%s", model_name, version)
         except Exception as e:
-            print(f"TTS init failed for {model_name}/{version}: {e}")
+            failures.append((model_name, version, e))
+            app.logger.error("TTS init failed for %s/%s: %s", model_name, version, e)
+    if failures and require_ready:
+        failed_models = ", ".join(f"{model}/{version}" for model, version, _ in failures)
+        raise TTSServiceError(f"Required TTS model(s) unavailable: {failed_models}") from failures[0][2]
+    return not failures
 
 @app.route("/api/tts", methods=["POST"])
 @limiter.limit("120 per hour")
@@ -1277,7 +1461,7 @@ def tts():
         body = {"error": str(e)}
         if e.upstream is not None:
             body["upstream"] = e.upstream
-        return jsonify(body), 502
+        return jsonify(body), e.status_code or 502
 
 
 # ── Avatar (OpenAvatarChat) LLM proxy ──────────────────────────────────────────
@@ -1714,6 +1898,7 @@ def get_lesson_media(lesson_id, filename):
 LIVETALKING_BASE_URL = os.environ.get("LIVETALKING_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
 LIVETALKING_SIGNALING_TIMEOUT = int(os.environ.get("LIVETALKING_SIGNALING_TIMEOUT", "60"))
 LIVETALKING_COMMAND_TIMEOUT = int(os.environ.get("LIVETALKING_COMMAND_TIMEOUT", "15"))
+LIVETALKING_HEALTH_TIMEOUT = float(os.environ.get("LIVETALKING_HEALTH_TIMEOUT", "2"))
 LIVETALKING_MAX_TEXT_LENGTH = 2000
 TUTOR_ATTEMPT_TTL_SECONDS = 3600
 TUTOR_CHAT_MODEL = os.environ.get("TUTOR_CHAT_MODEL", "gpt-5.4-mini")
@@ -1748,6 +1933,27 @@ TUTOR_CONTEXT_STOP_WORDS = {
 }
 
 
+def _livetalking_is_ready():
+    response = requests.get(f"{LIVETALKING_BASE_URL}/health", timeout=LIVETALKING_HEALTH_TIMEOUT)
+    response.raise_for_status()
+    payload = response.json()
+    return isinstance(payload, dict) and payload.get("status") == "ready"
+
+
+@app.route("/api/avatar/health", methods=["GET"])
+@limiter.exempt
+def avatar_health():
+    try:
+        ready = _livetalking_is_ready()
+    except (requests.RequestException, ValueError):
+        ready = False
+    response = jsonify({"status": "ready" if ready else "unavailable"})
+    response.headers["Cache-Control"] = "no-store"
+    if not ready:
+        response.headers["Retry-After"] = "2"
+    return response, 200 if ready else 503
+
+
 @app.route("/api/lessons/<lesson_id>/avatar/webrtc/offer", methods=["POST"])
 @limiter.limit("60 per hour")
 def avatar_webrtc_offer(lesson_id):
@@ -1762,6 +1968,15 @@ def avatar_webrtc_offer(lesson_id):
         return jsonify({"error": "WebRTC message type must be 'offer'"}), 400
     if not isinstance(body.get("sdp"), str) or not body["sdp"].strip():
         return jsonify({"error": "Missing SDP offer"}), 400
+
+    try:
+        if not _livetalking_is_ready():
+            raise requests.RequestException("LiveTalking is not ready")
+    except (requests.RequestException, ValueError) as e:
+        app.logger.warning("LiveTalking readiness check failed: %s: %s", type(e).__name__, e)
+        response = jsonify({"error": "Avatar service is starting. Please retry shortly."})
+        response.headers["Retry-After"] = "2"
+        return response, 503
 
     try:
         upstream = requests.post(

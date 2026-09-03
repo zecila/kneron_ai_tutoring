@@ -38,7 +38,11 @@ let tutorPausedNarration = false;
 let tutorDeferredNarration = false;
 let tutorAllowsNarration = false;
 const ttsCache = new Map();      // notes text → blob URL, cached for the session
+const ttsPendingRequests = new Map();
 const TTS_CACHE_LIMIT = 5;
+const TTS_FETCH_MAX_ATTEMPTS = 3;
+const TTS_FETCH_RETRY_BASE_DELAY_MS = 1000;
+const TTS_FETCH_RETRY_MAX_DELAY_MS = 5000;
 let ttsRequestId = 0;
 let sentenceBoundaries = [];     // [{start, end}] in native audio seconds — speed independent
 let currentSentenceIndex = -1;
@@ -1848,11 +1852,17 @@ function renderSlide(index) {
         }
       }, 2000);
     } else {
-      prefetchTTS(notes).then(() => {
+      prefetchTTS(notes).then((ready) => {
         if (ttsRequestId !== snapId) return; // navigated away or user cancelled
         if (audioPaused) return;             // user cancelled during fetch
         const btn = document.getElementById("tts-narrate-btn");
-        if (btn && !currentAudio) speakNotes(notes, btn);
+        if (ready && btn && !currentAudio) {
+          speakNotes(notes, btn);
+        } else if (!ready && btn) {
+          setNarrationButtonPlaying(false);
+          btn.disabled = false;
+          btn.onclick = () => toggleNarrationFromControl(notes, btn);
+        }
       });
     }
   }
@@ -2393,8 +2403,9 @@ const TUTOR_SPEAKING_START_TIMEOUT_MS = 30000;
 const TUTOR_SPEAKING_IDLE_CONFIRMATIONS = 2;
 const TUTOR_WEBRTC_READY_TIMEOUT_MS = 20000;
 const TUTOR_WEBRTC_DISCONNECTED_GRACE_MS = 5000;
-const TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS = 3;
+const TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS = 8;
 const TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS = 1000;
+const TUTOR_WEBRTC_RECOVERY_MAX_DELAY_MS = 10000;
 
 const TutorSession = {
   peerConnection: null,
@@ -2676,6 +2687,7 @@ const TutorSession = {
       this._cancelRecovery();
       return;
     }
+    if (this.recoveryTimer !== null) return;
     if (this.recoveryAttempt >= TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS) {
       this._cancelRecovery();
       setTutorConnectionStatus("Could not restore the avatar connection.", true, { retry: true });
@@ -2684,7 +2696,10 @@ const TutorSession = {
 
     this.recoveryAttempt += 1;
     const attemptNumber = this.recoveryAttempt;
-    const delay = TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS * (2 ** (attemptNumber - 1));
+    const delay = Math.min(
+      TUTOR_WEBRTC_RECOVERY_BASE_DELAY_MS * (2 ** (attemptNumber - 1)),
+      TUTOR_WEBRTC_RECOVERY_MAX_DELAY_MS
+    );
     setTutorConnectionStatus(
       `Reconnecting avatar (${attemptNumber}/${TUTOR_WEBRTC_MAX_RECOVERY_ATTEMPTS})...`
     );
@@ -3138,11 +3153,15 @@ function ensureTutorSessionConnected() {
       console.error("[TutorSession] connect failed:", err);
       const widget = document.getElementById("tutor-chat-widget");
       if (!widget.classList.contains("hidden") && lessonId === connectingLessonId) {
-        setTutorConnectionStatus(
-          "Could not connect to the avatar service.",
-          true,
-          { retry: true }
-        );
+        if (TutorSession._canRecover(connectingLessonId)) {
+          TutorSession._scheduleRecovery(connectingLessonId);
+        } else {
+          setTutorConnectionStatus(
+            "Could not connect to the avatar service.",
+            true,
+            { retry: true }
+          );
+        }
       }
       throw err;
     });
@@ -4380,6 +4399,10 @@ function cacheGet(key) {
 }
 
 function cacheSet(key, url) {
+  if (ttsCache.has(key)) {
+    URL.revokeObjectURL(ttsCache.get(key));
+    ttsCache.delete(key);
+  }
   ttsCache.set(key, url);
   if (ttsCache.size > TTS_CACHE_LIMIT) {
     const oldestKey = ttsCache.keys().next().value;   // first key = least recently used
@@ -4388,20 +4411,65 @@ function cacheSet(key, url) {
   }
 }
 
-async function prefetchTTS(text) {
-  if (!text || ttsCache.has(text)) return;
+function waitForTTSRetry(delayMs) {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+async function fetchTTSUrl(text) {
+  const cachedUrl = cacheGet(text);
+  if (cachedUrl) return cachedUrl;
+  if (ttsPendingRequests.has(text)) return ttsPendingRequests.get(text);
+
+  const pending = (async () => {
+    let lastError = null;
+    for (let attempt = 1; attempt <= TTS_FETCH_MAX_ATTEMPTS; attempt++) {
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          const error = new Error(body.error || `TTS error ${res.status}`);
+          error.status = res.status;
+          throw error;
+        }
+        const blob = await res.blob();
+        if (!blob.size) throw new Error("TTS returned empty audio.");
+        const url = URL.createObjectURL(blob);
+        cacheSet(text, url);
+        return url;
+      } catch (err) {
+        lastError = err;
+        const retryable = !err.status || err.status === 502 || err.status === 503;
+        if (!retryable || attempt === TTS_FETCH_MAX_ATTEMPTS) break;
+        const delay = Math.min(
+          TTS_FETCH_RETRY_BASE_DELAY_MS * (2 ** (attempt - 1)),
+          TTS_FETCH_RETRY_MAX_DELAY_MS
+        );
+        await waitForTTSRetry(delay);
+      }
+    }
+    throw lastError || new Error("TTS request failed.");
+  })();
+
+  ttsPendingRequests.set(text, pending);
   try {
-    const res = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
-    });
-    if (!res.ok) return;
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    cacheSet(text, url);
+    return await pending;
+  } finally {
+    if (ttsPendingRequests.get(text) === pending) ttsPendingRequests.delete(text);
+  }
+}
+
+async function prefetchTTS(text) {
+  if (!text) return false;
+  try {
+    await fetchTTSUrl(text);
+    return true;
   } catch (err) {
     console.error("TTS prefetch failed:", err);
+    return false;
   }
 }
 
@@ -4444,16 +4512,7 @@ async function speakNotes(text, btn) {
   btn.disabled = true;
 
   try {
-    const res = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
-    });
-    if (!res.ok) throw new Error(`TTS error ${res.status}`);
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    cacheSet(text, url);      // ← cache it before first play
+    const url = await fetchTTSUrl(text);
 
     if (requestId !== ttsRequestId) return;   // slide changed mid-load; still cached, just don't play it
     btn.onclick = () => toggleNarrationFromControl(text, btn);

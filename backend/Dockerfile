@@ -27,9 +27,10 @@ RUN cd frontend && npm install && npm run build
 
 # Backend code
 COPY backend/ backend/
+RUN chmod +x backend/start.sh
 
 WORKDIR /app/backend
 
 EXPOSE 5000
 
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "--timeout", "120", "server:app"]
+CMD ["./start.sh"]

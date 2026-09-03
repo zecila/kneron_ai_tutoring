@@ -73,10 +73,11 @@ See [`API.md`](./API.md) for the full API reference and [`HANDOFF.md`](./HANDOFF
 
 2. **Prepare the LiveTalking model and avatar**, then run `./scripts/setup-local.sh`. The helper creates `.env` from `.env.example` on its first run and checks the local prerequisites.
 
-3. **Start LiveTalking** in its Python environment:
+3. **Install and start the managed LiveTalking service:**
    ```bash
-   python app.py --transport webrtc --model wav2lip --avatar_id tutor_avatar_v3
+   ./scripts/install-livetalking-service.sh
    ```
+   The user service starts LiveTalking at login and restarts it if the process exits or its readiness endpoint stops responding.
 
 4. **Build and start the Compose services:**
    ```bash
@@ -91,6 +92,8 @@ See [`API.md`](./API.md) for the full API reference and [`HANDOFF.md`](./HANDOFF
    docker compose down
    ```
    This stops and removes the containers but **keeps your data**. Tutor data in `backend/data/` is a host bind mount and is not touched by `down`. Avoid `docker compose down -v` unless you also intend to remove the cached WhisperLiveKit model.
+
+   LiveTalking is managed separately. Stop it with `systemctl --user stop kneron-livetalking.service` only when the avatar should be offline.
 
 ## Environment variables
 
@@ -109,12 +112,19 @@ Copy `.env.example` to `.env` and set these values:
 | `TUTOR_TTS_VERSION` | Tutor avatar TTS model version/voice. Defaults to `TTS_VERSION` |
 | `TUTOR_CHAT_MODEL` | OpenAI-compatible model used for contextual tutor replies. Defaults to `gpt-5.4-mini` |
 | `TTS_MAX_CHARS_PER_REQUEST` | Maximum text sent in one TTS request. Longer narration and tutor replies are merged from WAV chunks. Defaults to `500` |
+| `TTS_MAX_RETRIES` | Number of retries after a transient upstream TTS failure. Defaults to `4` |
+| `TTS_REQUEST_TIMEOUT` | Timeout for one TTS generation request. Defaults to `60` seconds |
+| `TTS_READY_TIMEOUT` | Maximum container-startup wait for configured TTS models to become healthy. Defaults to `300` seconds |
+| `TTS_RECOVERY_TIMEOUT` | Maximum in-request wait when the backend needs to reinitialize a TTS model. Defaults to `45` seconds |
+| `TTS_LOCK_WAIT_TIMEOUT` | Maximum time a TTS request waits for the provider's single generation slot. Defaults to `100` seconds |
+| `TTS_LOCK_TIMEOUT` | Redis lock lifetime protecting that generation slot. Defaults to `130` seconds |
+| `LIVETALKING_HEALTH_TIMEOUT` | Timeout for the backend and supervisor readiness probe. Defaults to `2` seconds |
 | `REDIS_URL` | Already set in `docker-compose.yml` to `redis://redis:6379` — no action needed unless running outside Compose |
 | `FLASK_ENV` | `development` or `production`. Compose defaults to `development` unless overridden — set `FLASK_ENV=production` in your shell or `.env` before `up` for a production-style run |
 
 `MANIM_MCP_URL` and `MANIM_DOWNLOAD_URL` are already wired up in `docker-compose.yml` to point at the `manim-agent` service by its container name — no need to set these yourself under normal Compose usage.
 
-`LIVETALKING_BASE_URL` is also wired to `http://host.docker.internal:8010`, where the separately started local LiveTalking process listens.
+`LIVETALKING_BASE_URL` is also wired to `http://host.docker.internal:8010`, where the supervised local LiveTalking process listens. `GET /api/avatar/health` reports whether that process is ready without exposing internal details.
 
 The included WhisperLiveKit service runs the Faster Whisper `base` model on CPU, publishes port `8002`, and uses this Deepgram-compatible streaming endpoint:
 

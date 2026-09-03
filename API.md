@@ -57,6 +57,8 @@ The default limit is **200 requests per hour**. It is keyed by signed-in user, t
 | `POST /api/lessons/<lesson_id>/info/definition` | 60/hour |
 | `POST /api/lessons/<lesson_id>/info/equation` | 60/hour |
 | `POST /api/tts` | 120/hour |
+| `GET /api/health` | Exempt |
+| `GET /api/avatar/health` | Exempt |
 | `GET /api/lessons/<lesson_id>/status` | Exempt |
 | `POST /api/lessons/<lesson_id>/avatar/webrtc/offer` | 60/hour |
 | `POST /api/lessons/<lesson_id>/tutor/message` | 120/hour |
@@ -703,7 +705,11 @@ Synthesizes narration using the configured TTS model.
 - `400`: empty text
 - `502`: upstream TTS failure; the JSON error may include `upstream`
 
-Long text is split at sentence/word boundaries according to `TTS_MAX_CHARS_PER_REQUEST`, synthesized in chunks, and merged into one compatible WAV response.
+Long text is split at sentence/word boundaries according to `TTS_MAX_CHARS_PER_REQUEST`, synthesized in chunks, and merged into one compatible WAV response. The backend initializes the configured models before accepting traffic and retries model initialization after transient runtime failures. A Redis-backed generation lock queues concurrent requests because the configured provider exposes one usable generation slot; lock saturation returns `503` so the browser can retry safely.
+
+### `GET /api/health`
+
+Returns `{ "status": "ok" }` when the backend is accepting requests. Docker Compose uses this route for its backend health check.
 
 ### `GET /api/stt/config`
 
@@ -722,7 +728,11 @@ The browser connects directly to this endpoint. The Flask route does not initial
 
 ## Tutor And LiveTalking Avatar
 
-All routes in this section require lesson access. `sessionid` values are LiveTalking avatar session IDs and must contain 1-128 letters, digits, underscores, or hyphens. A positive integer `attempt_id` orders tutor requests so newer messages can invalidate stale speech work across backend workers.
+Except for the public health route, routes in this section require lesson access. `sessionid` values are LiveTalking avatar session IDs and must contain 1-128 letters, digits, underscores, or hyphens. A positive integer `attempt_id` orders tutor requests so newer messages can invalidate stale speech work across backend workers.
+
+### `GET /api/avatar/health`
+
+Returns `{ "status": "ready" }` when LiveTalking answers its readiness probe. It returns `503`, `{ "status": "unavailable" }`, and `Retry-After: 2` while LiveTalking is starting or unresponsive. This route is public, rate-limit exempt, and does not expose upstream service details.
 
 ### `POST /api/lessons/<lesson_id>/avatar/webrtc/offer`
 
@@ -736,6 +746,7 @@ The response body, status, and content type come from LiveTalking. Its successfu
 
 - `400`: invalid body, type, or SDP
 - `404`: no lesson access
+- `503`: LiveTalking is starting or failed its readiness probe; retry shortly
 - `502`: LiveTalking signaling unavailable
 
 ### `POST /api/lessons/<lesson_id>/tutor/message`

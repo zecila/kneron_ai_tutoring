@@ -17,11 +17,11 @@ The following dependencies are not started by Compose:
 
 | Dependency | How it runs |
 |---|---|
-| LiveTalking | Started manually in its Python environment on port `8010` |
+| LiveTalking | A systemd user service supervises its Python process on port `8010` |
 | LLM API | External service configured by `LLM_BASE_URL` |
 | TTS API | External service configured by `TTS_BASE_URL` |
 
-The normal startup therefore uses two terminals: one for LiveTalking and one for Docker Compose.
+LiveTalking is installed as a user service once. Normal startup only requires Docker Compose; the user service starts at login and restarts LiveTalking after crashes or failed health checks.
 
 ## Files Supplied With The Handoff
 
@@ -40,6 +40,7 @@ Do not commit the asset archive, model, avatar, or real `.env` file to Git.
 - Linux; the current setup was tested under Ubuntu/WSL
 - Git
 - Docker with the `docker compose` command
+- systemd user services and `loginctl` for automatic LiveTalking startup
 - Python 3.12 for LiveTalking
 - FFmpeg for LiveTalking
 - An NVIDIA GPU and current NVIDIA driver for LiveTalking
@@ -167,21 +168,30 @@ Setup is ready only when every reported check begins with `[ok]` and the script 
 
 The root `.env` is ignored by Git. Do not add it to a commit or send it through a public channel. A legacy `backend/.env` is not used by the handoff configuration and should not be created.
 
-## 5. Start LiveTalking
+## 5. Install The LiveTalking Service
 
-Open the first terminal and run:
+Make sure no manually started LiveTalking process is using port `8010`, then run:
 
 ```bash
-cd /path/to/kneron-tutor/LiveTalking
-source .venv/bin/activate
-python app.py --transport webrtc --model wav2lip --avatar_id tutor_avatar_v3
+cd /path/to/kneron-tutor/kneron_project
+./scripts/install-livetalking-service.sh
 ```
 
-Leave this terminal open. LiveTalking should report that its HTTP server is listening on port `8010`.
+The installer creates and enables a systemd user service. Its supervisor waits through model warm-up, checks `http://127.0.0.1:8010/health`, and restarts LiveTalking if it exits or stops responding. Follow its first startup with:
+
+```bash
+journalctl --user -u kneron-livetalking.service -f
+```
+
+Continue after this succeeds:
+
+```bash
+curl -fsS http://127.0.0.1:8010/health
+```
 
 ## 6. Start The Compose Services
 
-Open a second terminal and run:
+Run:
 
 ```bash
 cd /path/to/kneron-tutor/kneron_project
@@ -226,21 +236,22 @@ Useful logs:
 
 ```bash
 docker compose logs -f backend whisperlivekit
+journalctl --user -u kneron-livetalking.service -f
 ```
 
 Press `Ctrl+C` to stop following logs; the containers continue running.
 
-## Everyday Startup
-
-After the first build, start LiveTalking in the first terminal:
+Run the post-restart TTS and avatar smoke test from the tutor repository:
 
 ```bash
-cd /path/to/kneron-tutor/LiveTalking
-source .venv/bin/activate
-python app.py --transport webrtc --model wav2lip --avatar_id tutor_avatar_v3
+../LiveTalking/.venv/bin/python scripts/smoke-services.py
 ```
 
-Then start the Compose services in the second terminal:
+It waits for backend and avatar readiness, validates five real WAV responses, establishes a WebRTC connection with audio and video tracks, and cleans up the avatar session. A nonzero exit means the restart is not ready for users.
+
+## Everyday Startup
+
+The managed LiveTalking service starts at login. Start the Compose services with:
 
 ```bash
 cd /path/to/kneron-tutor/kneron_project
@@ -248,6 +259,13 @@ docker compose up -d
 ```
 
 Open <http://localhost:5000>.
+
+Verify or restart the avatar service when needed:
+
+```bash
+systemctl --user status kneron-livetalking.service
+systemctl --user restart kneron-livetalking.service
+```
 
 ## Updating The Tutor
 
